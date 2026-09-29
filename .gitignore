@@ -1,0 +1,13 @@
+.DS_Store
+.build/
+build/
+Windows/**/bin/
+Windows/**/obj/
+*.xlsx
+*.xls
+*.png
+*.jpg
+*.jpeg
+*.heic
+*.HEIC
+!Assets/AppIcon.png

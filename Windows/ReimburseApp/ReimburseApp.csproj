@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <ApplicationIcon>../../Assets/AppIcon.ico</ApplicationIcon>
+    <AssemblyName>报销单助手</AssemblyName>
+    <RootNamespace>ReimburseApp</RootNamespace>
+    <Version>1.2.0</Version>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="ClosedXML" Version="0.105.0" />
+    <PackageReference Include="Magick.NET-Q8-x64" Version="14.11.0" />
+    <PackageReference Include="Tesseract" Version="5.2.0" GeneratePathProperty="true" />
+  </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="tessdata/chi_sim.traineddata" />
+    <EmbeddedResource Include="tessdata/eng.traineddata" />
+    <EmbeddedResource Include="$(PkgTesseract)/x64/leptonica-1.82.0.dll" LogicalName="ReimburseApp.native.x64.leptonica-1.82.0.dll" />
+    <EmbeddedResource Include="$(PkgTesseract)/x64/tesseract50.dll" LogicalName="ReimburseApp.native.x64.tesseract50.dll" />
+  </ItemGroup>
+</Project>
