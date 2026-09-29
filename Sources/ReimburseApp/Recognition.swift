@@ -11,7 +11,7 @@ public struct Suggestion: Sendable {
     public var amountCandidates: [AmountCandidate] = []
 }
 
-public struct AmountCandidate: Sendable, Hashable {
+public struct AmountCandidate: Codable, Sendable, Hashable {
     public let amount: Decimal
     public let source: String
 }
@@ -46,13 +46,13 @@ public enum Recognition {
                 .compactMap { $0 }.joined(separator: "；")
             if suggestion.warning == "" { suggestion.warning = nil }
         }
-        if suggestion.amount == nil { suggestion.amountCandidates = amountCandidates(in: positioned) }
+        if suggestion.amount == nil {
+            suggestion.amountCandidates = amountCandidates(in: positioned)
+        }
         return suggestion
     }
 
     static func amountCandidates(in lines: [PositionedText]) -> [AmountCandidate] {
-        let text = lines.map(\.text).joined(separator: "\n")
-        if ["退款成功", "已退款", "收款成功", "已收款", "转入成功", "收入到账"].contains(where: text.contains) { return [] }
         var ranked: [(AmountCandidate, Int, Int)] = []
         func add(_ amount: Decimal, source: String, score: Int, order: Int) {
             guard amount > 0 else { return }
@@ -82,6 +82,24 @@ public enum Recognition {
                     if found.count == 1, let amount = found.first {
                         add(amount, source: value == "合计" ? "订单合计" : "整单实付", score: 90, order: index)
                     }
+                }
+            }
+            guard !isNonPaidLine(value) else { continue }
+            for amount in amounts(in: value, pattern: #"(?<![\dA-Za-z])[-−–]\s*[¥￥]?\s*(\d{1,6}(?:\.\d{1,2})?)(?![\d.,A-Za-z])"#) {
+                add(amount, source: "扣款数字", score: 55, order: index)
+            }
+            for amount in amounts(in: value, pattern: #"[¥￥]\s*(\d{1,6}(?:,\d{3})*(?:\.\d{1,2})?)(?![\d,])"#) {
+                add(amount, source: "带货币符号", score: 45, order: index)
+            }
+            for amount in amounts(in: value, pattern: #"(?<![\dA-Za-z])(\d{1,6}(?:\.\d{1,2})?)\s*元"#) {
+                add(amount, source: "金额文字", score: 40, order: index)
+            }
+            for amount in amounts(in: value, pattern: #"(?<![\d./-])(\d{1,6}\.\d{1,2})(?![\d./-])"#) {
+                add(amount, source: "小数金额", score: 30, order: index)
+            }
+            if lines[max(0, index - 2)..<index].contains(where: { containsPaidLabel($0.text) }) {
+                for amount in amounts(in: value, pattern: #"^\s*(\d{1,6})\s*$"#) {
+                    add(amount, source: "支付附近金额", score: 25, order: index)
                 }
             }
         }
@@ -115,7 +133,7 @@ public enum Recognition {
             let debits = lines.filter { $0.y > 0.68 }.flatMap { line in
                 amounts(in: line.text, pattern: signedAmountPattern).map { (amount: $0, y: line.y) }
             }
-            if let debit = debits.max(by: { $0.y < $1.y }) { return (debit.amount, "负数支出金额，请人工核对") }
+            if let debit = debits.max(by: { $0.y < $1.y }) { return (debit.amount, nil) }
         }
 
         for label in lines where label.text == "合计" {
@@ -174,7 +192,6 @@ public enum Recognition {
             }
             if !indicatesIncoming && signedAmounts.count == 1 {
                 amount = signedAmounts.first
-                warnings.append("负数支出金额，请人工核对")
             } else if signedAmounts.count > 1 {
                 amount = nil
                 warnings.append("识别到多个不同的支出金额，请人工核对")
@@ -247,13 +264,36 @@ public enum Recognition {
     }
 
     private static func category(for text: String) -> ExpenseCategory {
-        let rules: [(ExpenseCategory, [String])] = [
-            (.transport, ["打车", "网约车", "出租车", "地铁", "公交", "高铁", "火车", "机票", "车费", "滴滴"]),
-            (.meals, ["餐饮", "餐厅", "饭店", "外卖", "午餐", "晚餐", "早餐", "美食", "古茗", "奶茶", "咖啡", "茶饮"]),
-            (.lodging, ["酒店", "住宿", "宾馆", "民宿"]),
-            (.purchases, ["采购", "办公用品", "文具", "设备", "耗材"]),
+        let ignored = ["推荐", "广告", "优惠", "红包", "积分", "退款", "退货", "售后", "价格明细", "实付", "总价", "合计", "账单分类", "订单编号", "交易单号", "支付时间", "付款方式", "配送地址", "收货地址", "发票", "搜索订单", "全部订单", "飞猪旅行", "商品说明", "商户全称", "收单机构", "团购特价", "商家小程序"]
+        // 商品名称中的“咖啡”“酒店”等可能只是容器的用途或摆放场景，实物名优先。
+        let objects = ["道具", "器材", "设备", "工具", "电子", "数码", "文具", "家具", "家居", "灯具", "台灯", "布料", "地毯", "支架", "容器", "空瓶", "分装瓶", "玻璃瓶", "杯子", "餐具", "雨衣", "牙膏", "棉签", "清洁用品", "防尘罩", "读卡器", "硬盘盒", "亚克力", "花瓶", "仿真花", "干花", "纤维板", "板夹", "托盘", "切菜机", "桌布", "日用百货", "办公用品", "耗材"]
+        let strong: [(ExpenseCategory, [String])] = [
+            (.transport, ["打车", "网约车", "出租车", "地铁", "公交", "高铁", "火车票", "机票", "车费", "滴滴", "渡口", "渡轮", "停车费", "货拉拉", "乘车后付款", "高速通行费", "过路费", "ETC"]),
+            (.meals, ["食品", "食物", "餐饮", "小吃", "快餐", "火锅", "麻辣烫", "拌饭", "盖浇饭", "面馆", "烧烤", "汉堡", "披萨", "奶茶", "咖啡", "果汁", "饮料", "茶饮", "零食", "面包", "甜品", "蛋糕", "水果", "酒类", "酒庄", "张裕", "双人餐", "把子肉", "酸汤", "美食市集", "古茗"]),
+            (.lodging, ["酒店", "住宿", "宾馆", "民宿", "房费"]),
         ]
-        return rules.first { _, words in words.contains { text.localizedCaseInsensitiveContains($0) } }?.0 ?? .uncategorized
+        let weak: [(ExpenseCategory, [String])] = [
+            (.meals, ["餐厅", "饭店", "外卖", "午餐", "晚餐", "早餐", "美食"]),
+            (.purchases, ["超市"]),
+        ]
+        var scores: [ExpenseCategory: Int] = [:]
+        for line in text.components(separatedBy: .newlines) {
+            guard !ignored.contains(where: line.contains) else { continue }
+            if objects.contains(where: { line.localizedCaseInsensitiveContains($0) }) {
+                scores[.purchases, default: 0] += 3
+                continue
+            }
+            for (category, words) in strong where words.contains(where: { line.localizedCaseInsensitiveContains($0) }) {
+                scores[category, default: 0] += 3
+            }
+            for (category, words) in weak where words.contains(where: { line.localizedCaseInsensitiveContains($0) }) {
+                scores[category, default: 0] += 1
+            }
+        }
+        let ranked = scores.sorted { $0.value > $1.value }
+        guard let best = ranked.first, best.value >= 3,
+              best.value >= (ranked.dropFirst().first?.value ?? 0) + 2 else { return .uncategorized }
+        return best.key
     }
 
     private static func amounts(in text: String, pattern: String) -> Set<Decimal> {

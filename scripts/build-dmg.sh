@@ -2,7 +2,7 @@
 set -euo pipefail
 
 project_dir=${0:A:h:h}
-output_dmg="$project_dir/build/报销单助手.dmg"
+output_dmg="$project_dir/build/报销单助手-1.8.dmg"
 stage_dir=$(/usr/bin/mktemp -d /private/tmp/reimbursement-dmg.XXXXXX)
 temporary_dmg="$stage_dir.dmg"
 

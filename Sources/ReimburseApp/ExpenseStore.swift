@@ -15,6 +15,53 @@ import Foundation
 
     public init() {}
 
+    public func reset() {
+        expenses = []
+        pendingIDs = []
+        confirmedWarnings = []
+        recognizedTexts = [:]
+        amountCandidates = [:]
+        fingerprints = [:]
+        editedFields = [:]
+    }
+
+    func snapshot(title: String) -> DraftSnapshot {
+        DraftSnapshot(
+            title: title,
+            updatedAt: Date(),
+            expenses: expenses,
+            pendingIDs: pendingIDs,
+            confirmedWarnings: confirmedWarnings,
+            recognizedTexts: recognizedTexts,
+            amountCandidates: amountCandidates
+        )
+    }
+
+    func restore(_ snapshot: DraftSnapshot) {
+        expenses = snapshot.expenses
+        pendingIDs = snapshot.pendingIDs
+        confirmedWarnings = snapshot.confirmedWarnings
+        recognizedTexts = snapshot.recognizedTexts
+        amountCandidates = snapshot.amountCandidates
+        editedFields = [:]
+        fingerprints = [:]
+        for expense in expenses {
+            if let data = try? Data(contentsOf: expense.sourceURL) {
+                fingerprints[expense.id] = Data(SHA256.hash(data: data))
+            }
+        }
+        for id in pendingIDs {
+            guard let expense = expenses.first(where: { $0.id == id }) else { continue }
+            var edited: Set<Field> = []
+            if expense.amount != nil { edited.insert(.amount) }
+            if expense.category != .uncategorized { edited.insert(.category) }
+            if !expense.purpose.isEmpty { edited.insert(.purpose) }
+            if !expense.date.isEmpty { edited.insert(.date) }
+            editedFields[id] = edited
+            Task { await recognizeExpense(id: id, url: expense.sourceURL) }
+        }
+    }
+
     public var exportExpenses: [Expense] {
         expenses.filter { !$0.isDuplicate }.enumerated().map { index, original in
             var expense = original
@@ -30,6 +77,10 @@ import Foundation
                   let amount = expense.amount, amount > 0 else { return sum }
             return sum + amount
         }
+    }
+
+    public var amountTotal: Decimal {
+        exportExpenses.reduce(Decimal.zero) { $0 + (($1.amount ?? .zero) > 0 ? ($1.amount ?? .zero) : .zero) }
     }
 
     public var reviewCount: Int {
@@ -116,6 +167,10 @@ import Foundation
             expenses[index].purpose = category == .uncategorized ? "" : category.rawValue + "费用"
             markEdited(id, field: .purpose)
         }
+    }
+
+    public func confirmAll() {
+        confirmedWarnings.formUnion(expenses.filter { !$0.isDuplicate }.map(\.id))
     }
 
     private func renumber() {

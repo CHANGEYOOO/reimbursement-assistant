@@ -4,15 +4,15 @@ public enum ExpenseCategory: String, CaseIterable, Codable, Sendable {
     case transport = "交通"
     case meals = "餐食"
     case lodging = "住宿"
-    case purchases = "采购"
+    case purchases = "道具采购"
     case other = "其他"
     case uncategorized = "待分类"
 }
 
-public struct Expense: Identifiable, Sendable {
+public struct Expense: Identifiable, Codable, Sendable {
     public let id: UUID
     public var number: Int
-    public let sourceURL: URL
+    public var sourceURL: URL
     public var amount: Decimal?
     public var category: ExpenseCategory
     public var purpose: String
@@ -44,6 +44,19 @@ public struct Expense: Identifiable, Sendable {
 }
 
 public enum ExpenseDate {
+    public static func formattedInput(_ value: String, previous: String) -> String {
+        var digits = String(value.filter { $0 >= "0" && $0 <= "9" }.prefix(8))
+        if previous.hasSuffix("-"), value == String(previous.dropLast()) {
+            digits = String(digits.dropLast())
+        }
+        var result = String(digits.prefix(4))
+        if digits.count >= 4 { result += "-" }
+        if digits.count > 4 { result += digits.dropFirst(4).prefix(2) }
+        if digits.count >= 6 { result += "-" }
+        if digits.count > 6 { result += digits.dropFirst(6) }
+        return result
+    }
+
     public static func normalized(year: Int, month: Int, day: Int) -> String? {
         guard (1900...2099).contains(year) else { return nil }
         var calendar = Calendar(identifier: .gregorian)
