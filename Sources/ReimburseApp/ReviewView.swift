@@ -35,6 +35,7 @@ public struct ReviewView: View {
                     Text(controls.saveStatus).font(.caption).foregroundStyle(.secondary)
                     Spacer()
                     Button("新建报销单") { createDraft() }
+                    Button("AI 设置") { controls.showingAISettings = true }
                     Button("打开 / 管理报销单") { openDraftPicker() }
                         .disabled(controls.exportingInvoices)
                 }
@@ -79,7 +80,7 @@ public struct ReviewView: View {
                         .font(.caption).foregroundStyle(.secondary)
                     Spacer()
                     Button("全部标记已人工核对") { store.confirmAll() }
-                        .disabled(store.expenses.isEmpty || !store.pendingIDs.isEmpty)
+                        .disabled(store.expenses.isEmpty || !store.pendingIDs.isEmpty || !store.aiPendingIDs.isEmpty)
                     Button {
                         controls.showingOrderPreview.toggle()
                     } label: {
@@ -276,6 +277,9 @@ public struct ReviewView: View {
             }
             .padding()
             .frame(width: 620, height: 380)
+        }
+        .sheet(isPresented: $controls.showingAISettings) {
+            AISettingsView(close: { controls.showingAISettings = false }, saved: { store.invalidateAIRequests() })
         }
         .sheet(isPresented: $controls.showingDrafts) {
             VStack(alignment: .leading, spacing: 12) {
@@ -608,6 +612,7 @@ private struct InvoiceRow: View {
     @Published var draft: DraftSummary?
     @Published var availableDrafts: [DraftSummary] = []
     @Published var showingDrafts = false
+    @Published var showingAISettings = false
     @Published var showingExportIssues = false
     @Published var scrollTargetID: UUID?
     @Published var showingInvoices = false
@@ -681,7 +686,12 @@ private struct ExpenseRow: View {
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
-                if store.pendingIDs.contains(expense.id) { ProgressView().controlSize(.small) }
+                if store.pendingIDs.contains(expense.id) || store.aiPendingIDs.contains(expense.id) {
+                    ProgressView().controlSize(.small)
+                }
+                if let note = store.aiNotes[expense.id] {
+                    Text(note).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                }
                 if !store.pendingIDs.contains(expense.id), !expense.isDuplicate {
                     let reasons = store.issues(for: expense)
                     if !reasons.isEmpty {
@@ -689,6 +699,11 @@ private struct ExpenseRow: View {
                     }
                 }
                 if !expense.isDuplicate && !store.pendingIDs.contains(expense.id) {
+                    Button(store.aiPendingIDs.contains(expense.id) ? "AI 判断中…" : "AI 重新判断用途") {
+                        store.classifyWithAI(expense.id)
+                    }
+                    .font(.caption)
+                    .disabled(store.aiPendingIDs.contains(expense.id) || store.recognizedTexts[expense.id]?.isEmpty != false)
                     Toggle("已人工核对", isOn: Binding(
                         get: { store.confirmedWarnings.contains(expense.id) },
                         set: { checked in
@@ -697,6 +712,7 @@ private struct ExpenseRow: View {
                         }
                     ))
                     .font(.caption)
+                    .disabled(store.aiPendingIDs.contains(expense.id))
                 }
                 if let text = store.recognizedTexts[expense.id], !text.isEmpty {
                     DisclosureGroup("识别文字") {

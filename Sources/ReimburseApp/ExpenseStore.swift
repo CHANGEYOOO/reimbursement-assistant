@@ -25,6 +25,10 @@ public struct ExpenseExportIssue: Identifiable {
     @Published public var confirmedWarnings: Set<UUID> = []
     @Published public private(set) var recognizedTexts: [UUID: String] = [:]
     @Published public private(set) var amountCandidates: [UUID: [AmountCandidate]] = [:]
+    @Published public private(set) var aiPendingIDs: Set<UUID> = []
+    @Published public private(set) var aiNotes: [UUID: String] = [:]
+    private var aiTokens: [UUID: UUID] = [:]
+    private var categoryRevisions: [UUID: Int] = [:]
     private var fingerprints: [UUID: Data] = [:]
     private var editedFields: [UUID: Set<Field>] = [:]
     private var recognitionTokens: [UUID: UUID] = [:]
@@ -54,6 +58,10 @@ public struct ExpenseExportIssue: Identifiable {
     }
 
     private func clearUndo() {
+        aiTokens = [:]
+        aiPendingIDs = []
+        aiNotes = [:]
+        categoryRevisions = [:]
         actionUndoManager.removeAllActions()
         undoActionName = nil
         recognitionTokens = [:]
@@ -148,6 +156,7 @@ public struct ExpenseExportIssue: Identifiable {
     public func issues(for expense: Expense) -> [String] {
         guard !expense.isDuplicate else { return [] }
         var reasons = pendingIDs.contains(expense.id) ? ["正在识别，请等待完成"] : []
+        if aiPendingIDs.contains(expense.id) { reasons.append("AI 正在判断用途，请等待完成或手动选择分类") }
         reasons += missingFields(for: expense)
         if let warning = expense.warning, !confirmedWarnings.contains(expense.id), !pendingIDs.contains(expense.id) {
             reasons.append("\(warning)；请人工核对")
@@ -157,7 +166,7 @@ public struct ExpenseExportIssue: Identifiable {
 
     public func status(for expense: Expense) -> ExpenseReviewStatus {
         if expense.isDuplicate { return .duplicate }
-        if pendingIDs.contains(expense.id) { return .processing }
+        if pendingIDs.contains(expense.id) || aiPendingIDs.contains(expense.id) { return .processing }
         if !missingFields(for: expense).isEmpty { return .incomplete }
         if expense.warning != nil && !confirmedWarnings.contains(expense.id) { return .needsReview }
         return confirmedWarnings.contains(expense.id) ? .reviewed : .ready
@@ -183,6 +192,7 @@ public struct ExpenseExportIssue: Identifiable {
     public var exportBlocker: String? {
         if exportExpenses.isEmpty { return "请先导入截图。" }
         if !pendingIDs.isEmpty { return "请等待截图识别完成。" }
+        if !aiPendingIDs.isEmpty { return "请等待 AI 用途判断完成，或手动选择分类。" }
         if let issue = exportIssues.first, let reason = issue.reasons.first {
             return "第\(issue.number)笔\(reason)。"
         }
@@ -238,6 +248,10 @@ public struct ExpenseExportIssue: Identifiable {
         let deleted = DeletedExpense(expense: expenses[index], index: index, fingerprint: fingerprints[id],
             confirmed: confirmedWarnings.contains(id), text: recognizedTexts[id], candidates: amountCandidates[id],
             edited: editedFields[id], pending: pendingIDs.contains(id))
+        aiTokens.removeValue(forKey: id)
+        aiPendingIDs.remove(id)
+        aiNotes.removeValue(forKey: id)
+        categoryRevisions.removeValue(forKey: id)
         recognitionTokens.removeValue(forKey: id)
         let wasDuplicate = expenses[index].isDuplicate
         let fingerprint = fingerprints.removeValue(forKey: id)
@@ -275,6 +289,9 @@ public struct ExpenseExportIssue: Identifiable {
                 expenses[index].warning = "重复截图，已排除在合计和导出之外。"
                 recognitionTokens.removeValue(forKey: otherID)
                 pendingIDs.remove(otherID)
+                aiTokens.removeValue(forKey: otherID)
+                aiPendingIDs.remove(otherID)
+                aiNotes.removeValue(forKey: otherID)
             }
         }
         renumber()
@@ -336,7 +353,93 @@ public struct ExpenseExportIssue: Identifiable {
     }
 
     func markEdited(_ id: UUID, field: Field) {
+        if field == .category || field == .purpose {
+            categoryRevisions[id, default: 0] += 1
+            if aiTokens.removeValue(forKey: id) != nil {
+                aiPendingIDs.remove(id)
+                aiNotes[id] = "已保留你的手动修改。"
+            }
+        }
         editedFields[id, default: []].insert(field)
+    }
+
+    public func classifyWithAI(_ id: UUID) {
+        guard !pendingIDs.contains(id), !aiPendingIDs.contains(id),
+              let expense = expenses.first(where: { $0.id == id }), !expense.isDuplicate else { return }
+        guard let text = recognizedTexts[id], !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            aiNotes[id] = "没有可供 AI 判断的识别文字。"
+            return
+        }
+        do {
+            guard let configuration = try AIConfiguration.currentRequest() else {
+                aiNotes[id] = "请先在 AI 设置中配置并启用服务。"
+                return
+            }
+            let token = UUID()
+            let configurationRevision = AIConfiguration.revision
+            let revision = categoryRevisions[id, default: 0]
+            let wasConfirmed = confirmedWarnings.contains(id)
+            aiTokens[id] = token
+            aiPendingIDs.insert(id)
+            aiNotes[id] = "AI 正在判断用途…"
+            Task {
+                do {
+                    let result = try await SemanticClassifier.classify(text: text, configuration: configuration)
+                    guard aiTokens[id] == token else { return }
+                    guard AIConfiguration.enabled, AIConfiguration.revision == configurationRevision else {
+                        aiNotes[id] = "AI 配置已更新，旧请求结果未应用。"
+                        finishAI(id)
+                        return
+                    }
+                    guard expenses.contains(where: { $0.id == id }),
+                          categoryRevisions[id, default: 0] == revision,
+                          confirmedWarnings.contains(id) == wasConfirmed else {
+                        aiNotes[id] = "已保留你在 AI 判断期间的手动修改。"
+                        finishAI(id)
+                        return
+                    }
+                    applySemanticClassification(result, to: id)
+                } catch {
+                    guard aiTokens[id] == token else { return }
+                    aiNotes[id] = "AI 未完成：\(error.localizedDescription)。可继续手动选择分类。"
+                }
+                guard aiTokens[id] == token else { return }
+                finishAI(id)
+            }
+        } catch {
+            aiNotes[id] = "AI 配置不可用：\(error.localizedDescription)"
+        }
+    }
+
+    func applySemanticClassification(_ result: SemanticClassification, to id: UUID) {
+        guard let index = expenses.firstIndex(where: { $0.id == id }), !expenses[index].isDuplicate else { return }
+        if result.isCertain && result.category != .uncategorized {
+            let oldCategory = expenses[index].category
+            let oldDefault = oldCategory == .uncategorized ? "" : oldCategory.rawValue + "费用"
+            if expenses[index].purpose.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || expenses[index].purpose == oldDefault {
+                expenses[index].purpose = result.category.rawValue + "费用"
+            }
+            expenses[index].category = result.category
+            confirmedWarnings.remove(id)
+            var warnings = (expenses[index].warning ?? "").components(separatedBy: "；")
+                .filter { !$0.isEmpty && $0 != "用途分类待确认" && $0 != "AI用途建议，请人工核对" }
+            warnings.append("AI用途建议，请人工核对")
+            expenses[index].warning = warnings.joined(separator: "；")
+            aiNotes[id] = "AI 建议\(result.category.rawValue)：\(result.reason)"
+        } else {
+            aiNotes[id] = "AI 尚不能确定，请手动选择分类：\(result.reason)"
+        }
+    }
+
+    private func finishAI(_ id: UUID) {
+        aiTokens.removeValue(forKey: id)
+        aiPendingIDs.remove(id)
+    }
+
+    public func invalidateAIRequests() {
+        for id in aiPendingIDs { aiNotes[id] = "AI 配置已更新，旧请求结果不再应用。" }
+        aiTokens = [:]
+        aiPendingIDs = []
     }
 
     func selectAmountCandidate(_ candidate: AmountCandidate, for id: UUID) {
@@ -402,6 +505,7 @@ public struct ExpenseExportIssue: Identifiable {
 
     private func recognizeExpense(id: UUID, url: URL, token: UUID) async {
         guard recognitionTokens[id] == token else { return }
+        let restoredManualPurpose = editedFields[id]?.contains(.category) == true || editedFields[id]?.contains(.purpose) == true
         do {
             let suggestion = try await Task.detached(priority: .userInitiated) {
                 try await Recognition.recognize(url)
@@ -417,5 +521,10 @@ public struct ExpenseExportIssue: Identifiable {
         recognitionTokens.removeValue(forKey: id)
         pendingIDs.remove(id)
         editedFields.removeValue(forKey: id)
+        if let expense = expenses.first(where: { $0.id == id }), expense.category == .uncategorized,
+           !confirmedWarnings.contains(id), !restoredManualPurpose,
+           categoryRevisions[id, default: 0] == 0, AIConfiguration.enabled {
+            classifyWithAI(id)
+        }
     }
 }
