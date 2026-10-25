@@ -154,7 +154,7 @@ public struct ReviewView: View {
                 .background(.background)
                 .onChange(of: controls.scrollTargetID) { _, id in
                     guard let id else { return }
-                    withAnimation { proxy.scrollTo(id, anchor: .center) }
+                    withAnimation { proxy.scrollTo(id, anchor: .top) }
                     controls.scrollTargetID = nil
                 }
                 }
@@ -206,7 +206,10 @@ public struct ReviewView: View {
                         .disabled(store.undoActionName == nil)
                     }
                     if !controls.showingInvoices, blocker != nil, !store.expenses.isEmpty {
-                        Button("查看待处理问题") { controls.showingExportIssues = true }
+                        Button("查看待处理问题") {
+                            if let first = store.exportIssues.first { locateExpense(first.id) }
+                            else { controls.showingExportIssues = true }
+                        }
                     }
                 }
                 .padding(.horizontal)
@@ -252,12 +255,7 @@ public struct ReviewView: View {
                 if store.exportIssues.isEmpty, let blocker { Text(blocker).foregroundStyle(.orange) }
                 List(store.exportIssues) { issue in
                     Button {
-                        controls.amountQuery = ""
-                        controls.onlyNeedsReview = false
-                        controls.showingInvoices = false
-                        selection.selectedID = issue.id
-                        controls.showingExportIssues = false
-                        controls.scrollTargetID = issue.id
+                        locateExpense(issue.id)
                     } label: {
                         HStack {
                             Text("第 \(issue.number) 笔").bold().frame(width: 70, alignment: .leading)
@@ -529,6 +527,16 @@ public struct ReviewView: View {
                 } else { continuation.resume(returning: nil) }
             }
         }
+    }
+
+    private func locateExpense(_ id: UUID) {
+        controls.amountQuery = ""
+        controls.onlyNeedsReview = false
+        controls.showingInvoices = false
+        controls.showingOrderPreview = true
+        selection.selectedID = id
+        controls.showingExportIssues = false
+        controls.scrollTargetID = id
     }
 
     private func saveWorkbook() {
