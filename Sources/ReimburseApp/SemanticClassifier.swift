@@ -195,7 +195,7 @@ public enum SemanticClassifier {
     只有证据明确且整单类别单一时certainty为high，否则为uncertain，category为待分类。
     """
 
-    public static func makeRequest(text: String, configuration: AIRequestConfiguration, includeAmount: Bool = false, includeDate: Bool = false) throws -> URLRequest {
+    public static func makeRequest(text: String, configuration: AIRequestConfiguration, includeAmount: Bool = false, includeDate: Bool = false, referenceDate: Date = Date()) throws -> URLRequest {
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { throw SemanticError.emptyText }
         guard text.count <= 30_000 else { throw SemanticError.inputTooLong }
@@ -220,8 +220,8 @@ public enum SemanticClassifier {
         if includeDate {
             taskInstruction += """
 
-            同时判断本单支付/交易日期。仅选择原文中完整出现并有效的年月日，不得猜年份，不得用当前日期或文件日期，不得从订单号中截取日期。支付、付款、交易、扣款、转账或成交日期优先；下单、创建、配送、预计到达和开票日期不能充当支付日期。
-            只有明确支付/交易标签及完整日期证据才为high；缺少这种证据时date=null、certainty=uncertain，可保留完整原文日期候选，最多4个。
+            同时判断本单支付/交易日期。本次参考公历年为\(Calendar(identifier: .gregorian).component(.year, from: referenceDate))。原文明示完整年份时必须保留，不得改成年份参考值；只有原文确实仅有月日时才按本次参考公历年补全年份，并在reason中说明。不得猜月日，不得用当前月日或文件日期，不得从订单号或金额中截取日期，无效完整日期也不能截取月日重新解释。
+            支付、付款、交易、扣款、转账或成交日期优先；下单、创建、配送、预计到达和开票日期不能充当支付日期。只有明确支付/交易标签及有效完整日期或可按规则补全年份的月日证据才为high；缺少这种依据时date=null、certainty=uncertain，可保留有效日期候选，最多4个。
             JSON增加字段："transaction_date":{"date":null,"certainty":"uncertain","reason":"简短依据","candidates":[]}。确定时date改为原文日期的YYYY-MM-DD字符串，certainty改为high；候选也用YYYY-MM-DD字符串。
             """
         }
@@ -233,8 +233,8 @@ public enum SemanticClassifier {
         return request
     }
 
-    public static func classify(text: String, configuration: AIRequestConfiguration, includeAmount: Bool = false, includeDate: Bool = false) async throws -> SemanticClassification {
-        let request = try makeRequest(text: text, configuration: configuration, includeAmount: includeAmount, includeDate: includeDate)
+    public static func classify(text: String, configuration: AIRequestConfiguration, includeAmount: Bool = false, includeDate: Bool = false, referenceDate: Date = Date()) async throws -> SemanticClassification {
+        let request = try makeRequest(text: text, configuration: configuration, includeAmount: includeAmount, includeDate: includeDate, referenceDate: referenceDate)
         let settings = URLSessionConfiguration.ephemeral
         settings.timeoutIntervalForRequest = 45
         settings.timeoutIntervalForResource = 45
@@ -251,12 +251,12 @@ public enum SemanticClassifier {
             throw SemanticError.connection
         }
         guard let http = response as? HTTPURLResponse else { throw SemanticError.invalidResponse }
-        let result = try decodeResponse(data, statusCode: http.statusCode, sourceText: text)
+        let result = try decodeResponse(data, statusCode: http.statusCode, sourceText: text, referenceDate: referenceDate)
         return SemanticClassification(category: result.category, isCertain: result.isCertain, reason: result.reason,
             payment: includeAmount ? result.payment : nil, transactionDate: includeDate ? result.transactionDate : nil)
     }
 
-    public static func decodeResponse(_ data: Data, statusCode: Int, sourceText: String? = nil) throws -> SemanticClassification {
+    public static func decodeResponse(_ data: Data, statusCode: Int, sourceText: String? = nil, referenceDate: Date = Date()) throws -> SemanticClassification {
         guard (200..<300).contains(statusCode) else { throw SemanticError.http(statusCode) }
         guard data.count <= 1_000_000 else { throw SemanticError.invalidResponse }
         struct Response: Decodable {
@@ -292,7 +292,7 @@ public enum SemanticClassifier {
             isCertain: result.certainty == "high" && category != .uncategorized,
             reason: result.reason.trimmingCharacters(in: .whitespacesAndNewlines),
             payment: sourceText.flatMap { payment(in: object?["payment"], source: $0) },
-            transactionDate: sourceText.flatMap { transactionDate(in: object?["transaction_date"], source: $0) })
+            transactionDate: sourceText.flatMap { transactionDate(in: object?["transaction_date"], source: $0, referenceDate: referenceDate) })
     }
 
     private static func reason(in object: [String: Any]) -> String? {
@@ -315,13 +315,14 @@ public enum SemanticClassifier {
         let expression = try! NSRegularExpression(pattern: #"(?<![\dA-Za-z.,/:\-−–])[-−–]?\s*[¥￥]?\s*[-−–]?\s*((?:\d{1,3}(?:,\d{3})+|\d{1,9})(?:\.\d{1,2})?)(?![\dA-Za-z.,/:\-%％])"#)
         var values: Set<Decimal> = []
         var previousPaymentLabel = false
+        var previousDateLabel = false
         var emptyLines = 0
         let paymentLabels = ["实付", "实付款", "已支付", "支付金额", "付款金额", "扣款金额", "实际支付", "实际扣款"]
         for line in source.components(separatedBy: .newlines) {
             let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
             if trimmed.isEmpty {
                 emptyLines += 1
-                if emptyLines > 1 { previousPaymentLabel = false }
+                if emptyLines > 1 { previousPaymentLabel = false; previousDateLabel = false }
                 continue
             }
             var linkedInteger = previousPaymentLabel && trimmed.range(of: #"^\d{1,9}$"#, options: .regularExpression) != nil
@@ -329,6 +330,8 @@ public enum SemanticClassifier {
                 let iso = String(trimmed.prefix(4)) + "-" + String(trimmed.dropFirst(4).prefix(2)) + "-" + String(trimmed.suffix(2))
                 if ExpenseDate.isValid(iso) { linkedInteger = false }
             }
+            let temporalContext = previousDateLabel || line.contains("日期") || line.contains("时间")
+            previousDateLabel = trimmed.range(of: #"^(?:支付|付款|交易|扣款|转账|成交|下单|创建|配送|开票)?(?:日期|时间)\s*[:：]?\s*$"#, options: .regularExpression) != nil
             previousPaymentLabel = paymentLabels.contains(trimmed.trimmingCharacters(in: CharacterSet(charactersIn: " ：:")))
             emptyLines = 0
             let ns = line as NSString
@@ -340,7 +343,8 @@ public enum SemanticClassifier {
                 let currency = token.contains("¥") || token.contains("￥") || ns.substring(from: NSMaxRange(match.range)).trimmingCharacters(in: .whitespaces).hasPrefix("元")
                 let standalone = line.trimmingCharacters(in: .whitespacesAndNewlines) == token
                 let numericAmount = standalone && (number.contains(".") || token.contains("-") || token.contains("−") || token.contains("–"))
-                if (currency || (!identifier && labelled) || numericAmount || linkedInteger), let amount = money(number) { values.insert(amount) }
+                let temporalNumber = temporalContext && !currency && number.range(of: #"^\d{1,2}\.\d{1,2}$"#, options: .regularExpression) != nil
+                if !temporalNumber && (currency || (!identifier && labelled) || numericAmount || linkedInteger), let amount = money(number) { values.insert(amount) }
             }
         }
         return values
@@ -370,43 +374,78 @@ public enum SemanticClassifier {
             reason: proposed != nil && amount == nil ? "AI 金额缺少原文依据，请从候选中人工确认" : reason, candidates: validCandidates)
     }
 
-    private static func dateEvidence(in source: String) -> (all: Set<String>, paid: Set<String>) {
-        let separated = try! NSRegularExpression(pattern: #"(?<!\d)((?:19|20)\d{2})[年./-]\s*(\d{1,2})[月./-]\s*(\d{1,2})日?(?!\d)"#)
+    private static func dateEvidence(in source: String, referenceDate: Date) -> (all: Set<String>, paid: Set<String>, inferred: Set<String>, year: Int) {
+        let year = Calendar(identifier: .gregorian).component(.year, from: referenceDate)
+        let separated = try! NSRegularExpression(pattern: #"(?<!\d)(\d{4})\s*[年./-]\s*(\d{1,2})\s*[月./-]\s*(\d{1,2})\s*日?(?!\d)"#)
         let compact = try! NSRegularExpression(pattern: #"(?<!\d)((?:19|20)\d{2})(\d{2})(\d{2})(?!\d)"#)
+        let monthDay = try! NSRegularExpression(pattern: #"(?<![\dA-Za-z./:\-])(\d{1,2})\s*[月./-]\s*(\d{1,2})\s*日?(?![\dA-Za-z./:\-])"#)
         let paidLabels = ["支付时间", "支付日期", "付款时间", "付款日期", "交易时间", "交易日期", "扣款时间", "扣款日期", "转账时间", "转账日期", "成交时间", "成交日期"]
         let otherLabels = ["下单", "创建", "配送", "开票", "预计", "收货", "订单时间"]
+        let dateWords = ["日期", "时间", "下单", "创建", "配送", "开票", "预计", "收货", "成交"]
+        let identifiers = ["订单号", "订单编号", "交易单号", "编号", "单号", "电话", "手机号"]
         let lines = source.components(separatedBy: .newlines)
         var dates: [Int: Set<String>] = [:]
+        var inferred: Set<String> = []
+        var explicit: Set<String> = []
         for (index, line) in lines.enumerated() {
             let ns = line as NSString
-            let dateLabel = ["日期", "时间", "支付", "付款", "交易", "扣款", "转账", "成交", "下单", "创建", "配送", "开票"].contains(where: line.contains)
-            if ["订单号", "订单编号", "交易单号", "电话", "手机号"].contains(where: line.contains) { continue }
+            let dateLabel = dateWords.contains(where: line.contains) || paidLabels.contains(where: line.contains)
+            if identifiers.contains(where: line.contains) { continue }
+            let previousLine = (max(0, index - 2)..<index).reversed().first { !lines[$0].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            if !dateLabel, let previousLine, identifiers.contains(where: lines[previousLine].contains) { continue }
+            // Mask full-date spans even when invalid; their month/day must never become a new inferred date.
+            let masked = NSMutableString(string: line)
             for expression in [separated, compact] {
-                for match in expression.matches(in: line, range: NSRange(location: 0, length: ns.length)) {
+                let matches = expression.matches(in: line, range: NSRange(location: 0, length: ns.length))
+                for match in matches.reversed() {
+                    masked.replaceCharacters(in: match.range, with: String(repeating: " ", count: match.range.length))
                     if expression === compact && !dateLabel && line.trimmingCharacters(in: .whitespacesAndNewlines) != ns.substring(with: match.range) { continue }
-                    guard let year = Int(ns.substring(with: match.range(at: 1))),
+                    guard let fullYear = Int(ns.substring(with: match.range(at: 1))),
                           let month = Int(ns.substring(with: match.range(at: 2))),
                           let day = Int(ns.substring(with: match.range(at: 3))),
-                          let date = ExpenseDate.normalized(year: year, month: month, day: day) else { continue }
+                          let date = ExpenseDate.normalized(year: fullYear, month: month, day: day) else { continue }
                     dates[index, default: []].insert(date)
+                    explicit.insert(date)
                 }
+            }
+            let nearbyLabel = previousLine.map { previous in dateWords.contains(where: lines[previous].contains) || paidLabels.contains(where: lines[previous].contains) } ?? false
+            for match in monthDay.matches(in: masked as String, range: NSRange(location: 0, length: masked.length)) {
+                let token = ns.substring(with: match.range).trimmingCharacters(in: .whitespacesAndNewlines)
+                let prefix = ns.substring(to: match.range.location).trimmingCharacters(in: .whitespacesAndNewlines)
+                let suffix = ns.substring(from: NSMaxRange(match.range)).trimmingCharacters(in: .whitespacesAndNewlines)
+                let moneyAdjacent = prefix.hasSuffix("¥") || prefix.hasSuffix("￥") || suffix.hasPrefix("元") || suffix.hasPrefix("块") || suffix.hasPrefix("%")
+                    || prefix.range(of: #"(?:金额|价格|单价|实付|已支付|优惠|运费|合计|总价)\s*[:：]?\s*$"#, options: .regularExpression) != nil
+                guard !moneyAdjacent else { continue }
+                // Dotted month/day can also be a price; require a date label rather than guessing.
+                let standalone = line.trimmingCharacters(in: .whitespacesAndNewlines) == token
+                guard token.contains("月") || dateLabel || nearbyLabel || (standalone && !token.contains(".")) else { continue }
+                guard let month = Int(ns.substring(with: match.range(at: 1))),
+                      let day = Int(ns.substring(with: match.range(at: 2))),
+                      let date = ExpenseDate.normalized(year: year, month: month, day: day) else { continue }
+                dates[index, default: []].insert(date)
+                inferred.insert(date)
             }
         }
         var paid: Set<String> = []
         for (index, line) in lines.enumerated() where paidLabels.contains(where: line.contains) && !otherLabels.contains(where: line.contains) {
             for nearby in index..<min(lines.count, index + 3) {
-                if nearby > index && otherLabels.contains(where: lines[nearby].contains) { break }
+                if nearby > index && (otherLabels.contains(where: lines[nearby].contains) || identifiers.contains(where: lines[nearby].contains)) { break }
                 if let found = dates[nearby], !found.isEmpty { paid.formUnion(found); break }
             }
         }
-        return (Set(dates.values.flatMap { $0 }), paid)
+        return (Set(dates.values.flatMap { $0 }), paid, inferred.subtracting(explicit), year)
     }
 
-    private static func transactionDate(in raw: Any?, source: String) -> SemanticDate? {
-        let evidence = dateEvidence(in: source)
+    private static func transactionDate(in raw: Any?, source: String, referenceDate: Date) -> SemanticDate? {
+        let evidence = dateEvidence(in: source, referenceDate: referenceDate)
+        func annotated(_ reason: String, dates: [String]) -> String {
+            dates.contains(where: evidence.inferred.contains)
+                ? reason + "；原文仅月日，按当前年份\(evidence.year)补全" : reason
+        }
         guard let object = raw as? [String: Any], let reason = reason(in: object) else {
             let candidates = Array((evidence.paid.sorted() + evidence.all.subtracting(evidence.paid).sorted()).prefix(4))
-            return SemanticDate(date: nil, isCertain: false, reason: "AI 未返回有效日期，请从原文候选中确认", candidates: candidates)
+            return SemanticDate(date: nil, isCertain: false,
+                reason: annotated("AI 未返回有效日期，请从原文候选中确认", dates: candidates), candidates: candidates)
         }
         let proposed = object["date"] as? String
         let date = proposed.flatMap { ExpenseDate.isValid($0) && evidence.all.contains($0) ? $0 : nil }
@@ -418,8 +457,9 @@ public enum SemanticClassifier {
         if !certain {
             for candidate in evidence.paid.sorted() + evidence.all.subtracting(evidence.paid).sorted() where !candidates.contains(candidate) && candidates.count < 4 { candidates.append(candidate) }
         }
+        let baseReason = proposed != nil && date == nil ? "AI 日期缺少有效原文依据，请人工确认" : reason
         return SemanticDate(date: date, isCertain: certain,
-            reason: proposed != nil && date == nil ? "AI 日期缺少完整原文依据，请人工确认" : reason, candidates: candidates)
+            reason: annotated(baseReason, dates: candidates + [date].compactMap { $0 }), candidates: candidates)
     }
 
     private final class NoRedirect: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
