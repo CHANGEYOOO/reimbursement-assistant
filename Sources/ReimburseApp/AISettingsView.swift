@@ -8,10 +8,10 @@ struct AISettingsView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("AI 用途识别设置").font(.title2)
-            Toggle("启用 AI 辅助分类", isOn: $state.enabled)
+            Text("AI 辅助识别设置").font(.title2)
+            Toggle("启用 AI 辅助识别", isOn: $state.enabled)
                 .disabled(state.testing)
-            Text("启用后，无法确定分类的新订单会将本机识别文字发送到当前服务商。截图原图不会上传，金额和日期保持本地识别结果。")
+            Text("启用后，用途、金额或日期无法确定的新订单会将本机识别文字发送到当前服务商。截图原图不会上传；金额和日期必须有原文依据，仍需人工核对。")
                 .font(.callout).foregroundStyle(.secondary)
             Picker("服务商", selection: $state.provider) {
                 ForEach(AIProvider.allCases) { provider in Text(provider.title).tag(provider) }

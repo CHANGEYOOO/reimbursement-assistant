@@ -647,6 +647,7 @@ private struct ExpenseRow: View {
                 .buttonStyle(.borderless)
                 .controlSize(.mini)
             }.frame(width: 64, alignment: .leading)
+            VStack(alignment: .leading, spacing: 5) {
             LiveDateField(text: Binding(
                 get: { expense.date },
                 set: { value in
@@ -654,6 +655,14 @@ private struct ExpenseRow: View {
                     expense.date = value
                 }
             ))
+                if let dates = store.dateCandidates[expense.id], !dates.isEmpty {
+                    Text("选择支付日期").font(.caption).foregroundStyle(.secondary)
+                    ForEach(dates, id: \.self) { date in
+                        Button(date) { store.selectDateCandidate(date, for: expense.id) }
+                            .controlSize(.small).disabled(expense.isDuplicate)
+                    }
+                }
+            }
                 .frame(width: 118)
                 .padding(.trailing, 10)
             VStack(alignment: .leading, spacing: 5) {
@@ -699,7 +708,7 @@ private struct ExpenseRow: View {
                     }
                 }
                 if !expense.isDuplicate && !store.pendingIDs.contains(expense.id) {
-                    Button(store.aiPendingIDs.contains(expense.id) ? "AI 判断中…" : "AI 重新判断用途") {
+                    Button(store.aiPendingIDs.contains(expense.id) ? "AI 判断中…" : "AI 辅助识别") {
                         store.classifyWithAI(expense.id)
                     }
                     .font(.caption)
@@ -746,6 +755,11 @@ private struct ExpenseRow: View {
                     .textFieldStyle(.roundedBorder)
                     .onAppear { syncAmountDraft() }
                     .onChange(of: expense.amount) { _, _ in syncAmountDraft() }
+                    .onChange(of: store.aiAmountUpdates[expense.id]) { _, update in
+                        guard update != nil, store.aiAmountUpdates[expense.id] != nil else { return }
+                        amountDraft.edited = false
+                        amountDraft.text = expense.amount.map { "\($0)" } ?? ""
+                    }
                 if let candidates = store.amountCandidates[expense.id], !candidates.isEmpty {
                     Text("点击选择金额").font(.caption).foregroundStyle(.secondary)
                     ForEach(candidates, id: \.self) { candidate in

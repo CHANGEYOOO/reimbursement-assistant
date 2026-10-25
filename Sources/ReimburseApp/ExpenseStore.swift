@@ -29,6 +29,10 @@ public struct ExpenseExportIssue: Identifiable {
     @Published public private(set) var aiNotes: [UUID: String] = [:]
     private var aiTokens: [UUID: UUID] = [:]
     private var categoryRevisions: [UUID: Int] = [:]
+    private var amountRevisions: [UUID: Int] = [:]
+    private var dateRevisions: [UUID: Int] = [:]
+    @Published public private(set) var aiAmountUpdates: [UUID: Int] = [:]
+    @Published public private(set) var dateCandidates: [UUID: [String]] = [:]
     private var fingerprints: [UUID: Data] = [:]
     private var editedFields: [UUID: Set<Field>] = [:]
     private var recognitionTokens: [UUID: UUID] = [:]
@@ -62,6 +66,10 @@ public struct ExpenseExportIssue: Identifiable {
         aiPendingIDs = []
         aiNotes = [:]
         categoryRevisions = [:]
+        amountRevisions = [:]
+        dateRevisions = [:]
+        aiAmountUpdates = [:]
+        dateCandidates = [:]
         actionUndoManager.removeAllActions()
         undoActionName = nil
         recognitionTokens = [:]
@@ -100,6 +108,9 @@ public struct ExpenseExportIssue: Identifiable {
         editedFields = [:]
         fingerprints = [:]
         for expense in expenses {
+            // 旧草稿未记录数值来源，已保存的数值优先保留，避免覆盖历史人工填写。
+            if expense.amount != nil { amountRevisions[expense.id] = 1 }
+            if !expense.date.isEmpty { dateRevisions[expense.id] = 1 }
             if let data = try? Data(contentsOf: expense.sourceURL) {
                 fingerprints[expense.id] = Data(SHA256.hash(data: data))
             }
@@ -239,19 +250,29 @@ public struct ExpenseExportIssue: Identifiable {
         let confirmed: Bool
         let text: String?
         let candidates: [AmountCandidate]?
+        let dates: [String]?
         let edited: Set<Field>?
         let pending: Bool
+        let categoryRevision: Int
+        let amountRevision: Int
+        let dateRevision: Int
     }
 
     public func delete(_ id: UUID) {
         guard let index = expenses.firstIndex(where: { $0.id == id }) else { return }
         let deleted = DeletedExpense(expense: expenses[index], index: index, fingerprint: fingerprints[id],
             confirmed: confirmedWarnings.contains(id), text: recognizedTexts[id], candidates: amountCandidates[id],
-            edited: editedFields[id], pending: pendingIDs.contains(id))
+            dates: dateCandidates[id], edited: editedFields[id], pending: pendingIDs.contains(id),
+            categoryRevision: categoryRevisions[id, default: 0], amountRevision: amountRevisions[id, default: 0],
+            dateRevision: dateRevisions[id, default: 0])
         aiTokens.removeValue(forKey: id)
         aiPendingIDs.remove(id)
         aiNotes.removeValue(forKey: id)
         categoryRevisions.removeValue(forKey: id)
+        amountRevisions.removeValue(forKey: id)
+        dateRevisions.removeValue(forKey: id)
+        aiAmountUpdates.removeValue(forKey: id)
+        dateCandidates.removeValue(forKey: id)
         recognitionTokens.removeValue(forKey: id)
         let wasDuplicate = expenses[index].isDuplicate
         let fingerprint = fingerprints.removeValue(forKey: id)
@@ -281,6 +302,10 @@ public struct ExpenseExportIssue: Identifiable {
         if deleted.confirmed { confirmedWarnings.insert(id) }
         recognizedTexts[id] = deleted.text
         amountCandidates[id] = deleted.candidates
+        dateCandidates[id] = deleted.dates
+        categoryRevisions[id] = deleted.categoryRevision
+        amountRevisions[id] = deleted.amountRevision
+        dateRevisions[id] = deleted.dateRevision
         editedFields[id] = deleted.edited
         if !deleted.expense.isDuplicate, let fingerprint = deleted.fingerprint {
             for index in expenses.indices where expenses[index].id != id && fingerprints[expenses[index].id] == fingerprint {
@@ -353,23 +378,39 @@ public struct ExpenseExportIssue: Identifiable {
     }
 
     func markEdited(_ id: UUID, field: Field) {
-        if field == .category || field == .purpose {
-            categoryRevisions[id, default: 0] += 1
-            if aiTokens.removeValue(forKey: id) != nil {
-                aiPendingIDs.remove(id)
-                aiNotes[id] = "已保留你的手动修改。"
-            }
+        if field == .category || field == .purpose { categoryRevisions[id, default: 0] += 1 }
+        if field == .amount {
+            amountRevisions[id, default: 0] += 1
+            aiAmountUpdates.removeValue(forKey: id)
+        }
+        if field == .date { dateRevisions[id, default: 0] += 1 }
+        if aiTokens.removeValue(forKey: id) != nil {
+            aiPendingIDs.remove(id)
+            aiNotes[id] = "已保留你的手动修改。"
         }
         editedFields[id, default: []].insert(field)
     }
 
-    public func classifyWithAI(_ id: UUID) {
+    func needsAIAmount(_ expense: Expense) -> Bool {
+        if expense.amount == nil { return true }
+        guard amountRevisions[expense.id, default: 0] == 0,
+              !confirmedWarnings.contains(expense.id) else { return false }
+        let warning = expense.warning ?? ""
+        return ["仅识别到订单合计", "金额未标明实付", "金额未紧邻实付标识"].contains(where: warning.contains)
+            || (amountCandidates[expense.id]?.count ?? 0) > 1
+    }
+
+    public func classifyWithAI(_ id: UUID, includeCategory: Bool = true,
+                               includeAmount: Bool? = nil, includeDate: Bool? = nil) {
         guard !pendingIDs.contains(id), !aiPendingIDs.contains(id),
               let expense = expenses.first(where: { $0.id == id }), !expense.isDuplicate else { return }
         guard let text = recognizedTexts[id], !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             aiNotes[id] = "没有可供 AI 判断的识别文字。"
             return
         }
+        let assessAmount = (includeAmount ?? needsAIAmount(expense)) && needsAIAmount(expense)
+        let assessDate = (includeDate ?? !ExpenseDate.isValid(expense.date)) && !ExpenseDate.isValid(expense.date)
+        guard includeCategory || assessAmount || assessDate else { return }
         do {
             guard let configuration = try AIConfiguration.currentRequest() else {
                 aiNotes[id] = "请先在 AI 设置中配置并启用服务。"
@@ -378,30 +419,40 @@ public struct ExpenseExportIssue: Identifiable {
             let token = UUID()
             let configurationRevision = AIConfiguration.revision
             let revision = categoryRevisions[id, default: 0]
+            let amountRevision = amountRevisions[id, default: 0]
+            let dateRevision = dateRevisions[id, default: 0]
             let wasConfirmed = confirmedWarnings.contains(id)
             aiTokens[id] = token
             aiPendingIDs.insert(id)
-            aiNotes[id] = "AI 正在判断用途…"
+            aiNotes[id] = "AI 正在辅助识别…"
             Task {
                 do {
-                    let result = try await SemanticClassifier.classify(text: text, configuration: configuration)
+                    let result = try await SemanticClassifier.classify(text: text, configuration: configuration,
+                        includeAmount: assessAmount, includeDate: assessDate)
                     guard aiTokens[id] == token else { return }
                     guard AIConfiguration.enabled, AIConfiguration.revision == configurationRevision else {
                         aiNotes[id] = "AI 配置已更新，旧请求结果未应用。"
                         finishAI(id)
                         return
                     }
-                    guard expenses.contains(where: { $0.id == id }),
+                    guard let current = expenses.first(where: { $0.id == id }),
                           categoryRevisions[id, default: 0] == revision,
+                          amountRevisions[id, default: 0] == amountRevision,
+                          dateRevisions[id, default: 0] == dateRevision,
+                          current.amount == expense.amount, current.date == expense.date,
                           confirmedWarnings.contains(id) == wasConfirmed else {
                         aiNotes[id] = "已保留你在 AI 判断期间的手动修改。"
                         finishAI(id)
                         return
                     }
-                    applySemanticClassification(result, to: id)
+                    aiNotes[id] = ""
+                    if includeCategory { applySemanticClassification(result, to: id) }
+                    if assessAmount, let payment = result.payment { applySemanticPayment(payment, to: id) }
+                    if assessDate, let date = result.transactionDate { applySemanticDate(date, to: id) }
+                    if aiNotes[id]?.isEmpty != false { aiNotes[id] = "AI 未找到可确定的结果，请手动核对。" }
                 } catch {
                     guard aiTokens[id] == token else { return }
-                    aiNotes[id] = "AI 未完成：\(error.localizedDescription)。可继续手动选择分类。"
+                    aiNotes[id] = "AI 未完成：\(error.localizedDescription)。可继续手动填写。"
                 }
                 guard aiTokens[id] == token else { return }
                 finishAI(id)
@@ -409,6 +460,61 @@ public struct ExpenseExportIssue: Identifiable {
         } catch {
             aiNotes[id] = "AI 配置不可用：\(error.localizedDescription)"
         }
+    }
+
+    private func appendAINote(_ note: String, to id: UUID) {
+        aiNotes[id] = [aiNotes[id], note].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "\n")
+    }
+
+    private func requireAIReview(at index: Int, removing fragments: [String]) {
+        let id = expenses[index].id
+        confirmedWarnings.remove(id)
+        var warnings = (expenses[index].warning ?? "").components(separatedBy: "；")
+            .filter { warning in
+                !warning.isEmpty && !fragments.contains(where: warning.contains) && !warning.hasPrefix("AI")
+            }
+        warnings.append("AI识别建议，请人工核对")
+        expenses[index].warning = warnings.joined(separator: "；")
+    }
+
+    func applySemanticPayment(_ payment: SemanticPayment, to id: UUID) {
+        guard let index = expenses.firstIndex(where: { $0.id == id }), !expenses[index].isDuplicate,
+              needsAIAmount(expenses[index]) else { return }
+        if payment.isCertain, let amount = payment.amount, amount > 0 {
+            expenses[index].amount = amount
+            amountCandidates[id] = []
+            aiAmountUpdates[id, default: 0] += 1
+            requireAIReview(at: index, removing: ["未能确定实付金额", "未标明实付", "金额未紧邻实付标识", "仅识别到订单合计", "多笔订单", "多个不同的实付金额", "多个不同的支出金额"])
+            appendAINote("AI 建议金额 ¥\(amount)：\(payment.reason)", to: id)
+        } else {
+            var candidates = payment.candidates.map { AmountCandidate(amount: $0, source: "AI候选：原文金额") }
+            candidates += amountCandidates[id] ?? []
+            var seen: Set<Decimal> = []
+            amountCandidates[id] = Array(candidates.filter { seen.insert($0.amount).inserted }.prefix(6))
+            appendAINote("AI 尚不能确定金额，请选择候选或手动填写：\(payment.reason)", to: id)
+        }
+    }
+
+    func applySemanticDate(_ result: SemanticDate, to id: UUID) {
+        guard let index = expenses.firstIndex(where: { $0.id == id }), !expenses[index].isDuplicate,
+              !ExpenseDate.isValid(expenses[index].date) else { return }
+        if result.isCertain, let date = result.date, ExpenseDate.isValid(date) {
+            expenses[index].date = date
+            dateCandidates[id] = []
+            requireAIReview(at: index, removing: [])
+            appendAINote("AI 建议日期 \(date)：\(result.reason)", to: id)
+        } else {
+            dateCandidates[id] = result.candidates.filter(ExpenseDate.isValid)
+            appendAINote("AI 尚不能确定支付日期，请选择候选或手动填写：\(result.reason)", to: id)
+        }
+    }
+
+    func selectDateCandidate(_ date: String, for id: UUID) {
+        guard dateCandidates[id]?.contains(date) == true,
+              let index = expenses.firstIndex(where: { $0.id == id }), !expenses[index].isDuplicate else { return }
+        markEdited(id, field: .date)
+        expenses[index].date = date
+        dateCandidates[id] = []
     }
 
     func applySemanticClassification(_ result: SemanticClassification, to id: UUID) {
@@ -420,14 +526,10 @@ public struct ExpenseExportIssue: Identifiable {
                 expenses[index].purpose = result.category.rawValue + "费用"
             }
             expenses[index].category = result.category
-            confirmedWarnings.remove(id)
-            var warnings = (expenses[index].warning ?? "").components(separatedBy: "；")
-                .filter { !$0.isEmpty && $0 != "用途分类待确认" && $0 != "AI用途建议，请人工核对" }
-            warnings.append("AI用途建议，请人工核对")
-            expenses[index].warning = warnings.joined(separator: "；")
-            aiNotes[id] = "AI 建议\(result.category.rawValue)：\(result.reason)"
+            requireAIReview(at: index, removing: ["用途分类待确认"])
+            appendAINote("AI 建议\(result.category.rawValue)：\(result.reason)", to: id)
         } else {
-            aiNotes[id] = "AI 尚不能确定，请手动选择分类：\(result.reason)"
+            appendAINote("AI 尚不能确定用途，请手动选择分类：\(result.reason)", to: id)
         }
     }
 
@@ -506,6 +608,8 @@ public struct ExpenseExportIssue: Identifiable {
     private func recognizeExpense(id: UUID, url: URL, token: UUID) async {
         guard recognitionTokens[id] == token else { return }
         let restoredManualPurpose = editedFields[id]?.contains(.category) == true || editedFields[id]?.contains(.purpose) == true
+        let restoredManualAmount = editedFields[id]?.contains(.amount) == true
+        let restoredManualDate = editedFields[id]?.contains(.date) == true
         do {
             let suggestion = try await Task.detached(priority: .userInitiated) {
                 try await Recognition.recognize(url)
@@ -521,10 +625,11 @@ public struct ExpenseExportIssue: Identifiable {
         recognitionTokens.removeValue(forKey: id)
         pendingIDs.remove(id)
         editedFields.removeValue(forKey: id)
-        if let expense = expenses.first(where: { $0.id == id }), expense.category == .uncategorized,
-           !confirmedWarnings.contains(id), !restoredManualPurpose,
-           categoryRevisions[id, default: 0] == 0, AIConfiguration.enabled {
-            classifyWithAI(id)
+        if let expense = expenses.first(where: { $0.id == id }), !confirmedWarnings.contains(id), AIConfiguration.enabled {
+            let category = expense.category == .uncategorized && !restoredManualPurpose && categoryRevisions[id, default: 0] == 0
+            let amount = needsAIAmount(expense) && !restoredManualAmount && amountRevisions[id, default: 0] == 0
+            let date = !ExpenseDate.isValid(expense.date) && !restoredManualDate && dateRevisions[id, default: 0] == 0
+            if category || amount || date { classifyWithAI(id, includeCategory: category, includeAmount: amount, includeDate: date) }
         }
     }
 }
