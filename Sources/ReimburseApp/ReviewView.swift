@@ -28,16 +28,19 @@ public struct ReviewView: View {
         ZStack {
             VStack(spacing: 12) {
                 HStack(spacing: 12) {
+                    Text("报销单").font(.headline)
                     TextField("报销单标题", text: $controls.title)
                         .textFieldStyle(.roundedBorder)
                         .frame(maxWidth: 360)
+                    Text(controls.saveStatus).font(.caption).foregroundStyle(.secondary)
+                    Spacer()
                     Button("新建报销单") { createDraft() }
                     Button("打开 / 管理报销单") { openDraftPicker() }
                         .disabled(controls.exportingInvoices)
-                    Text(controls.saveStatus).font(.caption).foregroundStyle(.secondary)
-                    Spacer()
                 }
                 .padding(.horizontal)
+
+                Divider()
 
                 HStack(spacing: 12) {
                     Picker("区域", selection: $controls.showingInvoices) {
@@ -48,23 +51,16 @@ public struct ReviewView: View {
                     .frame(width: 240)
                     if controls.showingInvoices {
                         Button("导入发票") { chooseInvoices() }
+                        Spacer()
                         Button(controls.exportingInvoices ? "正在导出…" : "导出发票文件夹") { exportInvoices() }
                             .disabled(invoices.invoices.isEmpty || controls.exportingInvoices || invoices.confirmationCount > 0)
-                        TextField("识别不到时填写购买方抬头", text: Binding(
-                            get: { invoices.companyTitleFallback },
-                            set: { invoices.updateCompanyTitleFallback($0) }
-                        ))
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 260)
-                        Text(controls.exportStatus).font(.caption).foregroundStyle(.secondary)
                     } else {
                         Button("导入截图") { chooseImages() }
-                        Button("全部标记已人工核对") { store.confirmAll() }
-                            .disabled(store.expenses.isEmpty || !store.pendingIDs.isEmpty)
+                        Spacer()
                         Button("导出 Excel") { saveWorkbook() }
-                            .disabled(blocker != nil)
+                            .disabled(store.expenses.isEmpty)
+                            .buttonStyle(.borderedProminent)
                     }
-                    Spacer()
                 }
                 .padding(.horizontal)
 
@@ -82,6 +78,8 @@ public struct ReviewView: View {
                     Text("显示 \(visibleExpenses.count) / \(store.expenses.count) 笔")
                         .font(.caption).foregroundStyle(.secondary)
                     Spacer()
+                    Button("全部标记已人工核对") { store.confirmAll() }
+                        .disabled(store.expenses.isEmpty || !store.pendingIDs.isEmpty)
                 }
                 .padding(.horizontal)
                 HStack(spacing: 0) {
@@ -93,6 +91,7 @@ public struct ReviewView: View {
                 }
                 .padding(.horizontal)
 
+                ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(spacing: 0) {
                         if visibleExpenses.isEmpty && !store.expenses.isEmpty {
@@ -107,6 +106,7 @@ public struct ReviewView: View {
                                     if selection.selectedID == expense.id { selection.selectedID = nil }
                                     store.delete(expense.id)
                                 })
+                                .id(expense.id)
                                 .contentShape(Rectangle())
                                 .background(selection.selectedID == expense.id ? Color.blue.opacity(0.18) : Color.clear)
                                 .simultaneousGesture(TapGesture().onEnded { selection.selectedID = expense.id })
@@ -144,7 +144,25 @@ public struct ReviewView: View {
                     }
                 }
                 .background(.background)
+                .onChange(of: controls.scrollTargetID) { _, id in
+                    guard let id else { return }
+                    withAnimation { proxy.scrollTo(id, anchor: .center) }
+                    controls.scrollTargetID = nil
+                }
+                }
                 } else {
+                    HStack {
+                        Text("备用购买方抬头").font(.caption).foregroundStyle(.secondary)
+                        TextField("识别不到时使用", text: Binding(
+                            get: { invoices.companyTitleFallback },
+                            set: { invoices.updateCompanyTitleFallback($0) }
+                        ))
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 300)
+                        Spacer()
+                        Text(controls.exportStatus).font(.caption).foregroundStyle(.secondary)
+                    }
+                    .padding(.horizontal)
                     invoiceList
                 }
 
@@ -165,7 +183,9 @@ public struct ReviewView: View {
                         Text("已导入 \(store.expenses.count) 张 · 有效 \(store.exportExpenses.count) 笔 · 待核对 \(store.reviewCount) 笔 · 合计 ¥\(currency(store.total))")
                     }
                     Spacer()
-                    if !controls.showingInvoices, let blocker { Text(blocker).foregroundStyle(.orange) }
+                    if !controls.showingInvoices, blocker != nil, !store.expenses.isEmpty {
+                        Button("查看待处理问题") { controls.showingExportIssues = true }
+                    }
                 }
                 .padding(.horizontal)
                 .padding(.bottom, 10)
@@ -189,6 +209,42 @@ public struct ReviewView: View {
         .onReceive(store.objectWillChange) { _ in scheduleSave() }
         .onChange(of: invoices.lastError) { _, error in
             if let error { controls.errorMessage = error }
+        }
+        .sheet(isPresented: $controls.showingExportIssues) {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("导出前需要处理的问题").font(.title2)
+                Text("点击订单可返回并定位；导出始终包含完整报销单。")
+                    .font(.caption).foregroundStyle(.secondary)
+                TextField("请填写报销单标题", text: $controls.title).textFieldStyle(.roundedBorder)
+                if store.exportIssues.isEmpty, let blocker { Text(blocker).foregroundStyle(.orange) }
+                List(store.exportIssues) { issue in
+                    Button {
+                        controls.amountQuery = ""
+                        controls.onlyNeedsReview = false
+                        controls.showingInvoices = false
+                        selection.selectedID = issue.id
+                        controls.showingExportIssues = false
+                        controls.scrollTargetID = issue.id
+                    } label: {
+                        HStack {
+                            Text("第 \(issue.number) 笔").bold().frame(width: 70, alignment: .leading)
+                            Text(issue.reasons.joined(separator: "；"))
+                            Spacer()
+                            Image(systemName: "arrow.right")
+                        }
+                    }
+                    .buttonStyle(.plain)
+                }
+                HStack {
+                    Button("返回修改") { controls.showingExportIssues = false }
+                    Spacer()
+                    if blocker == nil {
+                        Button("问题已处理，返回导出") { controls.showingExportIssues = false }
+                    }
+                }
+            }
+            .padding()
+            .frame(width: 620, height: 380)
         }
         .sheet(isPresented: $controls.showingDrafts) {
             VStack(alignment: .leading, spacing: 12) {
@@ -443,7 +499,10 @@ public struct ReviewView: View {
     }
 
     private func saveWorkbook() {
-        guard blocker == nil else { return }
+        guard blocker == nil else {
+            controls.showingExportIssues = true
+            return
+        }
         let panel = NSSavePanel()
         panel.allowedContentTypes = [UTType(filenameExtension: "xlsx")!]
         panel.nameFieldStringValue = controls.title + ".xlsx"
@@ -508,6 +567,8 @@ private struct InvoiceRow: View {
     @Published var draft: DraftSummary?
     @Published var availableDrafts: [DraftSummary] = []
     @Published var showingDrafts = false
+    @Published var showingExportIssues = false
+    @Published var scrollTargetID: UUID?
     @Published var showingInvoices = false
     @Published var amountQuery = ""
     @Published var onlyNeedsReview = false
@@ -558,6 +619,11 @@ private struct ExpenseRow: View {
                 ))
                     .textFieldStyle(.roundedBorder)
                 HStack {
+                    Text(store.status(for: expense).rawValue)
+                        .font(.caption.weight(.medium))
+                        .padding(.horizontal, 7).padding(.vertical, 3)
+                        .foregroundStyle(statusColor)
+                        .background(statusColor.opacity(0.12), in: Capsule())
                     Picker("分类", selection: Binding(
                         get: { expense.category },
                         set: { value in store.selectCategory(value, for: expense.id) }
@@ -573,9 +639,12 @@ private struct ExpenseRow: View {
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
-                if store.pendingIDs.contains(expense.id) { ProgressView("正在识别") }
-                if let warning = expense.warning, !store.pendingIDs.contains(expense.id) {
-                    Text(warning).font(.caption).foregroundStyle(.orange)
+                if store.pendingIDs.contains(expense.id) { ProgressView().controlSize(.small) }
+                if !store.pendingIDs.contains(expense.id), !expense.isDuplicate {
+                    let reasons = store.issues(for: expense)
+                    if !reasons.isEmpty {
+                        Text(reasons.joined(separator: "；")).font(.caption).foregroundStyle(.orange)
+                    }
                 }
                 if !expense.isDuplicate && !store.pendingIDs.contains(expense.id) {
                     Toggle("已人工核对", isOn: Binding(
@@ -645,6 +714,15 @@ private struct ExpenseRow: View {
 
     private func syncAmountDraft() {
         if !amountDraft.edited { amountDraft.text = expense.amount.map { "\($0)" } ?? "" }
+    }
+
+    private var statusColor: Color {
+        switch store.status(for: expense) {
+        case .processing: .blue
+        case .incomplete, .needsReview, .ready: .orange
+        case .reviewed: .green
+        case .duplicate: .secondary
+        }
     }
 }
 

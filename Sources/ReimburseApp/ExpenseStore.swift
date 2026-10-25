@@ -2,6 +2,21 @@ import Combine
 import CryptoKit
 import Foundation
 
+public enum ExpenseReviewStatus: String {
+    case processing = "识别中"
+    case incomplete = "待补全"
+    case needsReview = "待核对"
+    case reviewed = "已核对"
+    case ready = "待人工核对"
+    case duplicate = "重复"
+}
+
+public struct ExpenseExportIssue: Identifiable {
+    public let id: UUID
+    public let number: Int
+    public let reasons: [String]
+}
+
 @MainActor public final class ExpenseStore: ObservableObject {
     enum Field: Hashable { case amount, purpose, category, date }
 
@@ -88,12 +103,40 @@ import Foundation
     }
 
     func needsReview(_ expense: Expense) -> Bool {
-        !expense.isDuplicate && (
-            pendingIDs.contains(expense.id) || !(expense.amount.map { $0 > 0 } ?? false) ||
-            !ExpenseDate.isValid(expense.date) ||
-            expense.purpose.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
-            (expense.warning != nil && !confirmedWarnings.contains(expense.id))
-        )
+        !issues(for: expense).isEmpty
+    }
+
+    private func missingFields(for expense: Expense) -> [String] {
+        var reasons: [String] = []
+        if !(expense.amount.map { $0 > 0 } ?? false) { reasons.append("请填写正数金额") }
+        if !ExpenseDate.isValid(expense.date) { reasons.append("请填写有效日期（年-月-日）") }
+        if expense.purpose.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { reasons.append("请填写用途") }
+        return reasons
+    }
+
+    public func issues(for expense: Expense) -> [String] {
+        guard !expense.isDuplicate else { return [] }
+        var reasons = pendingIDs.contains(expense.id) ? ["正在识别，请等待完成"] : []
+        reasons += missingFields(for: expense)
+        if let warning = expense.warning, !confirmedWarnings.contains(expense.id), !pendingIDs.contains(expense.id) {
+            reasons.append("\(warning)；请人工核对")
+        }
+        return reasons
+    }
+
+    public func status(for expense: Expense) -> ExpenseReviewStatus {
+        if expense.isDuplicate { return .duplicate }
+        if pendingIDs.contains(expense.id) { return .processing }
+        if !missingFields(for: expense).isEmpty { return .incomplete }
+        if expense.warning != nil && !confirmedWarnings.contains(expense.id) { return .needsReview }
+        return confirmedWarnings.contains(expense.id) ? .reviewed : .ready
+    }
+
+    public var exportIssues: [ExpenseExportIssue] {
+        expenses.compactMap { expense in
+            let reasons = issues(for: expense)
+            return reasons.isEmpty ? nil : ExpenseExportIssue(id: expense.id, number: expense.number, reasons: reasons)
+        }
     }
 
     func matchesFilters(_ expense: Expense, amountQuery: String, onlyNeedsReview: Bool) -> Bool {
@@ -109,11 +152,8 @@ import Foundation
     public var exportBlocker: String? {
         if exportExpenses.isEmpty { return "请先导入截图。" }
         if !pendingIDs.isEmpty { return "请等待截图识别完成。" }
-        for expense in exportExpenses {
-            if !(expense.amount.map { $0 > 0 } ?? false) { return "第\(expense.number)笔请填写正数金额。" }
-            if !ExpenseDate.isValid(expense.date) { return "第\(expense.number)笔请填写有效日期（年-月-日）。" }
-            if expense.purpose.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return "第\(expense.number)笔请填写用途。" }
-            if expense.warning != nil && !confirmedWarnings.contains(expense.id) { return "第\(expense.number)笔请确认识别提示。" }
+        if let issue = exportIssues.first, let reason = issue.reasons.first {
+            return "第\(issue.number)笔\(reason)。"
         }
         return nil
     }
