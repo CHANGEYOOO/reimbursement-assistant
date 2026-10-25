@@ -27,7 +27,15 @@ public struct Invoice: Identifiable, Codable, Sendable {
     public init() {}
 
     public var total: Decimal {
-        invoices.reduce(Decimal.zero) { $0 + ($1.amount ?? .zero) }
+        invoices.filter { !needsConfirmation($0) }.reduce(Decimal.zero) { $0 + ($1.amount ?? .zero) }
+    }
+
+    public var confirmationCount: Int {
+        invoices.filter(needsConfirmation).count
+    }
+
+    public func needsConfirmation(_ invoice: Invoice) -> Bool {
+        pendingIDs.contains(invoice.id) || (invoice.amount ?? .zero) <= 0 || invoice.warning != nil
     }
 
     public func configure(directory: URL) {

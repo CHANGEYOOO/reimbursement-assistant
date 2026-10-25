@@ -84,12 +84,26 @@ import Foundation
     }
 
     public var reviewCount: Int {
-        exportExpenses.filter { expense in
+        expenses.filter { needsReview($0) }.count
+    }
+
+    func needsReview(_ expense: Expense) -> Bool {
+        !expense.isDuplicate && (
             pendingIDs.contains(expense.id) || !(expense.amount.map { $0 > 0 } ?? false) ||
             !ExpenseDate.isValid(expense.date) ||
             expense.purpose.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
             (expense.warning != nil && !confirmedWarnings.contains(expense.id))
-        }.count
+        )
+    }
+
+    func matchesFilters(_ expense: Expense, amountQuery: String, onlyNeedsReview: Bool) -> Bool {
+        if onlyNeedsReview && !needsReview(expense) { return false }
+        let query = amountQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return true }
+        guard let amount = expense.amount else { return false }
+        let text = amount.formatted(.number.locale(Locale(identifier: "en_US_POSIX"))
+            .grouping(.never).precision(.fractionLength(2)))
+        return text.contains(query)
     }
 
     public var exportBlocker: String? {

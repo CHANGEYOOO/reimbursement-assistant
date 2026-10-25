@@ -12,6 +12,13 @@ public struct ReviewView: View {
 
     public init() {}
 
+    private var visibleExpenses: [Binding<Expense>] {
+        $store.expenses.filter {
+            store.matchesFilters($0.wrappedValue, amountQuery: controls.amountQuery,
+                                 onlyNeedsReview: controls.onlyNeedsReview)
+        }
+    }
+
     private var blocker: String? {
         if controls.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return "请填写报销单标题。" }
         return store.exportBlocker
@@ -25,7 +32,8 @@ public struct ReviewView: View {
                         .textFieldStyle(.roundedBorder)
                         .frame(maxWidth: 360)
                     Button("新建报销单") { createDraft() }
-                    Button("打开报销单") { openDraftPicker() }
+                    Button("打开 / 管理报销单") { openDraftPicker() }
+                        .disabled(controls.exportingInvoices)
                     Text(controls.saveStatus).font(.caption).foregroundStyle(.secondary)
                     Spacer()
                 }
@@ -41,7 +49,7 @@ public struct ReviewView: View {
                     if controls.showingInvoices {
                         Button("导入发票") { chooseInvoices() }
                         Button(controls.exportingInvoices ? "正在导出…" : "导出发票文件夹") { exportInvoices() }
-                            .disabled(invoices.invoices.isEmpty || controls.exportingInvoices || !invoices.pendingIDs.isEmpty)
+                            .disabled(invoices.invoices.isEmpty || controls.exportingInvoices || invoices.confirmationCount > 0)
                         TextField("识别不到时填写购买方抬头", text: Binding(
                             get: { invoices.companyTitleFallback },
                             set: { invoices.updateCompanyTitleFallback($0) }
@@ -61,6 +69,21 @@ public struct ReviewView: View {
                 .padding(.horizontal)
 
                 if !controls.showingInvoices {
+                HStack(spacing: 12) {
+                    TextField("搜索已填写金额，例如 39", text: $controls.amountQuery)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 240)
+                        .accessibilityLabel("搜索已填写金额")
+                    if !controls.amountQuery.isEmpty {
+                        Button("清空搜索") { controls.amountQuery = "" }
+                    }
+                    Toggle("只看待核对", isOn: $controls.onlyNeedsReview)
+                        .toggleStyle(.checkbox)
+                    Text("显示 \(visibleExpenses.count) / \(store.expenses.count) 笔")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                }
+                .padding(.horizontal)
                 HStack(spacing: 0) {
                     header("序号", width: 64)
                     header("日期", width: 128)
@@ -72,7 +95,12 @@ public struct ReviewView: View {
 
                 ScrollView {
                     LazyVStack(spacing: 0) {
-                        ForEach($store.expenses) { $expense in
+                        if visibleExpenses.isEmpty && !store.expenses.isEmpty {
+                            Text("没有符合条件的订单，请调整搜索或筛选条件。")
+                                .foregroundStyle(.secondary)
+                                .padding()
+                        }
+                        ForEach(visibleExpenses) { $expense in
                             ExpenseRow(expense: $expense, store: store,
                                 showPreview: { controls.previewURL = expense.sourceURL },
                                 delete: {
@@ -122,10 +150,13 @@ public struct ReviewView: View {
 
                 HStack {
                     if controls.showingInvoices {
-                        Text("发票 \(invoices.invoices.count) 张 · 发票合计 ¥\(currency(invoices.total)) · 订单合计 ¥\(currency(store.amountTotal))")
+                        Text("发票 \(invoices.invoices.count) 张 · 待确认 \(invoices.confirmationCount) 张 · 已确定金额 ¥\(currency(invoices.total)) · 订单合计 ¥\(currency(store.amountTotal))")
                         let difference = store.amountTotal - invoices.total
                         if store.amountTotal == 0 {
                             Text("请先录入订单金额").foregroundStyle(.secondary)
+                        } else if invoices.confirmationCount > 0 {
+                            Text(difference > 0 ? "暂差 ¥\(currency(difference))，仍有发票待确认" : "已确定金额已足额，仍有发票待确认")
+                                .foregroundStyle(.orange)
                         } else {
                             Text(difference > 0 ? "还差 ¥\(currency(difference))" : "发票金额已足额")
                                 .foregroundStyle(difference > 0 ? .orange : .green)
@@ -161,24 +192,29 @@ public struct ReviewView: View {
         }
         .sheet(isPresented: $controls.showingDrafts) {
             VStack(alignment: .leading, spacing: 12) {
-                Text("打开报销单").font(.title2)
+                Text("管理报销单").font(.title2)
                 List(controls.availableDrafts) { item in
+                    HStack(spacing: 12) {
                     Button {
                         openDraft(item)
                         controls.showingDrafts = false
                     } label: {
                         HStack {
                             Text(item.title)
+                            if controls.draft?.id == item.id { Text("当前").font(.caption).foregroundStyle(.secondary) }
                             Spacer()
                             Text(item.updatedAt, style: .date).foregroundStyle(.secondary)
                         }
                     }
                     .buttonStyle(.plain)
+                    Button("重命名") { renameDraft(item) }
+                    Button("移入废纸篓", role: .destructive) { trashDraft(item) }
+                    }
                 }
                 Button("取消") { controls.showingDrafts = false }
             }
             .padding()
-            .frame(width: 440, height: 320)
+            .frame(width: 680, height: 360)
         }
         .alert("操作未完成", isPresented: Binding(
             get: { controls.errorMessage != nil },
@@ -262,6 +298,8 @@ public struct ReviewView: View {
             controls.title = created.title
             controls.saveStatus = "已保存"
             controls.showingInvoices = false
+            controls.amountQuery = ""
+            controls.onlyNeedsReview = false
         } catch { controls.errorMessage = "新建报销单失败：\(error.localizedDescription)" }
     }
 
@@ -284,7 +322,61 @@ public struct ReviewView: View {
             controls.title = opened.title
             controls.saveStatus = "已保存"
             controls.showingInvoices = false
+            controls.amountQuery = ""
+            controls.onlyNeedsReview = false
         } catch { controls.errorMessage = "打开草稿失败：\(error.localizedDescription)" }
+    }
+
+    private func renameDraft(_ selected: DraftSummary) {
+        let alert = NSAlert()
+        alert.messageText = "重命名报销单"
+        alert.addButton(withTitle: "保存")
+        alert.addButton(withTitle: "取消")
+        let field = NSTextField(string: selected.title)
+        field.frame = NSRect(x: 0, y: 0, width: 320, height: 24)
+        alert.accessoryView = field
+        alert.window.initialFirstResponder = field
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        do {
+            let renamed = try DraftStorage.rename(selected, to: field.stringValue)
+            if controls.draft?.id == selected.id {
+                controls.draft = renamed
+                controls.title = renamed.title
+            }
+            controls.availableDrafts = try DraftStorage.list()
+        } catch {
+            controls.showingDrafts = false
+            controls.errorMessage = "重命名失败：\(error.localizedDescription)"
+        }
+    }
+
+    private func trashDraft(_ selected: DraftSummary) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "将“\(selected.title)”移入废纸篓？"
+        alert.informativeText = "该报销单及其保存的订单截图和发票将一起移入废纸篓，原始导入文件不受影响。"
+        alert.addButton(withTitle: "取消")
+        alert.addButton(withTitle: "移入废纸篓")
+        guard alert.runModal() == .alertSecondButtonReturn else { return }
+        controls.saveTask?.cancel()
+        saveCurrent()
+        guard controls.saveStatus != "保存失败" else { return }
+        do {
+            try DraftStorage.moveToTrash(selected)
+            if controls.draft?.id == selected.id {
+                controls.draft = nil
+                controls.previewURL = nil
+                selection.selectedID = nil
+                store.reset()
+                let remaining = try DraftStorage.list()
+                if let next = remaining.first { openDraft(next) }
+                else { createDraft() }
+            }
+            controls.availableDrafts = try DraftStorage.list()
+        } catch {
+            controls.showingDrafts = false
+            controls.errorMessage = "操作已停止：\(error.localizedDescription)"
+        }
     }
 
     private func chooseInvoices() {
@@ -393,6 +485,7 @@ private struct InvoiceRow: View {
                 .textFieldStyle(.roundedBorder)
                 .frame(width: 120)
             if let warning = invoice.warning { Text(warning).font(.caption).foregroundStyle(.orange) }
+            else if store.needsConfirmation(invoice) { Text("待确认金额").font(.caption).foregroundStyle(.orange) }
             Button("删除") {
                 do { try store.delete(invoice.id) }
                 catch { reportError(error.localizedDescription) }
@@ -416,6 +509,8 @@ private struct InvoiceRow: View {
     @Published var availableDrafts: [DraftSummary] = []
     @Published var showingDrafts = false
     @Published var showingInvoices = false
+    @Published var amountQuery = ""
+    @Published var onlyNeedsReview = false
     @Published var saveStatus = ""
     @Published var exportingInvoices = false
     @Published var exportStatus = ""

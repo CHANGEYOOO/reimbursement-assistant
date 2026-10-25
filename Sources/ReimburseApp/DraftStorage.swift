@@ -80,6 +80,37 @@ struct DraftSnapshot: Codable {
         UserDefaults.standard.string(forKey: lastOpenedKey).flatMap(UUID.init(uuidString:))
     }
 
+    public static func rename(_ draft: DraftSummary, to title: String) throws -> DraftSummary {
+        let title = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty else {
+            throw NSError(domain: "DraftStorage", code: 1,
+                          userInfo: [NSLocalizedDescriptionKey: "报销单名称不能为空。"])
+        }
+        var snapshot = try read(draft.url)
+        snapshot.title = title
+        snapshot.updatedAt = Date()
+        try write(snapshot, to: draft.url)
+        return DraftSummary(id: draft.id, title: title, updatedAt: snapshot.updatedAt, url: draft.url)
+    }
+
+    public static func moveToTrash(_ draft: DraftSummary) throws {
+        let expected = directory.appendingPathComponent(draft.id.uuidString, isDirectory: true)
+        guard draft.url.standardizedFileURL == expected.standardizedFileURL,
+              try draft.url.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink != true else {
+            throw CocoaError(.fileWriteNoPermission)
+        }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/trash")
+        process.arguments = [draft.url.path]
+        try process.run()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            throw NSError(domain: "DraftStorage", code: Int(process.terminationStatus),
+                          userInfo: [NSLocalizedDescriptionKey: "移入废纸篓失败，报销单未删除。请检查权限后重试。"])
+        }
+        if lastOpened() == draft.id { UserDefaults.standard.removeObject(forKey: lastOpenedKey) }
+    }
+
     private static func cleanedTitle(_ title: String) -> String {
         let title = title.trimmingCharacters(in: .whitespacesAndNewlines)
         return title.isEmpty ? "未命名报销单" : title

@@ -77,7 +77,7 @@ private enum StoreChecks {
         check(pendingCategory.confirmedWarnings.contains(pendingID), "manual selection during OCR stays confirmed")
         check(pendingCategory.expenses[0].category == .meals, "OCR preserves manually selected category")
 
-        let invalid = URL(fileURLWithPath: "/private/tmp/reimbursement-sdd/invalid-image-\(UUID().uuidString).png")
+        let invalid = FileManager.default.temporaryDirectory.appendingPathComponent("invalid-image-\(UUID().uuidString).png")
         try Data([0, 1, 2, 3]).write(to: invalid)
         let failedStore = ExpenseStore()
         await failedStore.importFile(invalid)
@@ -119,6 +119,43 @@ private enum StoreChecks {
         check(review.expenses[2].date == "2026-09-02", "OCR preserves manually edited date")
         check(ExpenseStore.parseAmountInput("12abc") == nil, "malformed visible amount cannot export as 12")
         check(ExpenseStore.parseAmountInput("12.34") == Decimal(string: "12.34"), "valid amount parses fully")
+
+        let filtered = ExpenseStore()
+        let exact = Expense(number: 1, sourceURL: image, amount: 39, purpose: "餐食费用", date: "2026-09-01")
+        let partial = Expense(number: 2, sourceURL: image, amount: Decimal(string: "139.50"),
+            purpose: "交通费用", date: "2026-09-01", warning: "金额待核对")
+        let missing = Expense(number: 3, sourceURL: image)
+        var duplicate = exact
+        duplicate.isDuplicate = true
+        filtered.expenses = [exact, partial, missing]
+        check(filtered.expenses.filter { filtered.matchesFilters($0, amountQuery: "39", onlyNeedsReview: false) }
+            .map(\.id) == [exact.id, partial.id], "substring search preserves original order")
+        check(filtered.matchesFilters(exact, amountQuery: " 39.00 ", onlyNeedsReview: false),
+            "search supports two-decimal amounts and surrounding spaces")
+        check(!filtered.matchesFilters(exact, amountQuery: "3.9", onlyNeedsReview: false),
+            "search keeps decimal placement significant")
+        check(!filtered.matchesFilters(missing, amountQuery: "39", onlyNeedsReview: false),
+            "unfilled amounts do not match searches")
+        check(filtered.matchesFilters(missing, amountQuery: " ", onlyNeedsReview: false),
+            "clearing search restores unfilled records")
+        check(filtered.expenses.filter { filtered.matchesFilters($0, amountQuery: "39", onlyNeedsReview: true) }
+            .map(\.id) == [partial.id], "search and review filters combine")
+        check(filtered.reviewCount == 2 && filtered.needsReview(missing), "review filter shares review-count rules")
+        check(!filtered.needsReview(duplicate), "duplicates are excluded from needs-review")
+        filtered.confirmedWarnings.insert(partial.id)
+        check(!filtered.matchesFilters(partial, amountQuery: "39", onlyNeedsReview: true),
+            "confirming a completed record removes it from needs-review")
+        var invalidDate = exact
+        invalidDate.date = "2026-02-30"
+        check(filtered.needsReview(invalidDate), "invalid dates remain in needs-review")
+        var missingPurpose = exact
+        missingPurpose.purpose = " "
+        check(filtered.needsReview(missingPurpose), "blank purposes remain in needs-review")
+        let pendingFilterID = filtered.queue(image)
+        check(filtered.needsReview(filtered.expenses.last!) && filtered.pendingIDs.contains(pendingFilterID),
+            "pending recognition remains in needs-review")
+        check(filtered.exportExpenses.map(\.id) == [exact.id, partial.id, missing.id, pendingFilterID],
+            "filtering does not alter full export records or order")
 
         let changes = ExpenseStore()
         let a = Expense(number: 1, sourceURL: image, amount: 10, purpose: "交通费用")
