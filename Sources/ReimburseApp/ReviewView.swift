@@ -80,8 +80,16 @@ public struct ReviewView: View {
                     Spacer()
                     Button("全部标记已人工核对") { store.confirmAll() }
                         .disabled(store.expenses.isEmpty || !store.pendingIDs.isEmpty)
+                    Button {
+                        controls.showingOrderPreview.toggle()
+                    } label: {
+                        Label("截图预览", systemImage: "sidebar.right")
+                    }
+                    .help(controls.showingOrderPreview ? "收起右侧截图预览" : "显示右侧截图预览")
                 }
                 .padding(.horizontal)
+                HSplitView {
+                VStack(spacing: 8) {
                 HStack(spacing: 0) {
                     header("序号", width: 64)
                     header("日期", width: 128)
@@ -150,6 +158,20 @@ public struct ReviewView: View {
                     controls.scrollTargetID = nil
                 }
                 }
+                .frame(minWidth: 780)
+                }
+                if controls.showingOrderPreview {
+                    OrderPreviewPanel(
+                        expense: store.expenses.first {
+                            $0.id == selection.selectedID && store.matchesFilters($0,
+                                amountQuery: controls.amountQuery, onlyNeedsReview: controls.onlyNeedsReview)
+                        },
+                        enlarge: { controls.previewURL = $0 },
+                        close: { controls.showingOrderPreview = false }
+                    )
+                    .frame(minWidth: 260, idealWidth: 320, maxWidth: 500)
+                }
+                }
                 } else {
                     HStack {
                         Text("备用购买方抬头").font(.caption).foregroundStyle(.secondary)
@@ -163,26 +185,26 @@ public struct ReviewView: View {
                         Text(controls.exportStatus).font(.caption).foregroundStyle(.secondary)
                     }
                     .padding(.horizontal)
+                    InvoiceSummaryView(orderTotal: store.amountTotal, invoiceTotal: invoices.total,
+                                       confirmationCount: invoices.confirmationCount)
+                        .padding(.horizontal)
                     invoiceList
                 }
 
                 HStack {
                     if controls.showingInvoices {
-                        Text("发票 \(invoices.invoices.count) 张 · 待确认 \(invoices.confirmationCount) 张 · 已确定金额 ¥\(currency(invoices.total)) · 订单合计 ¥\(currency(store.amountTotal))")
-                        let difference = store.amountTotal - invoices.total
-                        if store.amountTotal == 0 {
-                            Text("请先录入订单金额").foregroundStyle(.secondary)
-                        } else if invoices.confirmationCount > 0 {
-                            Text(difference > 0 ? "暂差 ¥\(currency(difference))，仍有发票待确认" : "已确定金额已足额，仍有发票待确认")
-                                .foregroundStyle(.orange)
-                        } else {
-                            Text(difference > 0 ? "还差 ¥\(currency(difference))" : "发票金额已足额")
-                                .foregroundStyle(difference > 0 ? .orange : .green)
-                        }
+                        Text("已导入发票 \(invoices.invoices.count) 张 · 原格式独立导出")
+                            .font(.caption).foregroundStyle(.secondary)
                     } else {
                         Text("已导入 \(store.expenses.count) 张 · 有效 \(store.exportExpenses.count) 笔 · 待核对 \(store.reviewCount) 笔 · 合计 ¥\(currency(store.total))")
                     }
                     Spacer()
+                    if !controls.showingInvoices {
+                        Button(store.undoActionName.map { "撤销\($0)" } ?? "撤销") {
+                            store.undoLastAction()
+                        }
+                        .disabled(store.undoActionName == nil)
+                    }
                     if !controls.showingInvoices, blocker != nil, !store.expenses.isEmpty {
                         Button("查看待处理问题") { controls.showingExportIssues = true }
                     }
@@ -194,7 +216,18 @@ public struct ReviewView: View {
                 ImagePreview(url: previewURL) { controls.previewURL = nil }
             }
         }
-        .frame(minWidth: 1020, minHeight: 570)
+        .frame(minWidth: controls.showingOrderPreview && !controls.showingInvoices ? 1120 : 1020, minHeight: 620)
+        .background {
+            Button("撤销") {
+                if let editor = NSApp.keyWindow?.firstResponder as? NSTextView, editor.isEditable {
+                    editor.undoManager?.undo()
+                } else if !controls.showingInvoices {
+                    store.undoLastAction()
+                }
+            }
+            .keyboardShortcut("z", modifiers: .command)
+            .hidden().accessibilityHidden(true)
+        }
         .overlay {
             if controls.isDropTarget {
                 RoundedRectangle(cornerRadius: 10)
@@ -570,6 +603,7 @@ private struct InvoiceRow: View {
     @Published var showingExportIssues = false
     @Published var scrollTargetID: UUID?
     @Published var showingInvoices = false
+    @Published var showingOrderPreview = true
     @Published var amountQuery = ""
     @Published var onlyNeedsReview = false
     @Published var saveStatus = ""

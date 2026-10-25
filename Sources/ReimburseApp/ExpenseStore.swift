@@ -27,10 +27,40 @@ public struct ExpenseExportIssue: Identifiable {
     @Published public private(set) var amountCandidates: [UUID: [AmountCandidate]] = [:]
     private var fingerprints: [UUID: Data] = [:]
     private var editedFields: [UUID: Set<Field>] = [:]
+    private var recognitionTokens: [UUID: UUID] = [:]
+    public let actionUndoManager = UndoManager()
+    @Published public private(set) var undoActionName: String?
 
-    public init() {}
+    public init() { actionUndoManager.groupsByEvent = false }
+
+    public func undoLastAction() {
+        guard actionUndoManager.canUndo else { return }
+        actionUndoManager.undo()
+        updateUndoName()
+    }
+
+    private func updateUndoName() {
+        undoActionName = actionUndoManager.canUndo ? actionUndoManager.undoActionName : nil
+    }
+
+    private func registerUndo(_ name: String, action: @escaping @MainActor (ExpenseStore) -> Void) {
+        actionUndoManager.beginUndoGrouping()
+        actionUndoManager.registerUndo(withTarget: self) { store in
+            MainActor.assumeIsolated { action(store) }
+        }
+        actionUndoManager.setActionName(name)
+        actionUndoManager.endUndoGrouping()
+        updateUndoName()
+    }
+
+    private func clearUndo() {
+        actionUndoManager.removeAllActions()
+        undoActionName = nil
+        recognitionTokens = [:]
+    }
 
     public func reset() {
+        clearUndo()
         expenses = []
         pendingIDs = []
         confirmedWarnings = []
@@ -53,6 +83,7 @@ public struct ExpenseExportIssue: Identifiable {
     }
 
     func restore(_ snapshot: DraftSnapshot) {
+        clearUndo()
         expenses = snapshot.expenses
         pendingIDs = snapshot.pendingIDs
         confirmedWarnings = snapshot.confirmedWarnings
@@ -73,7 +104,7 @@ public struct ExpenseExportIssue: Identifiable {
             if !expense.purpose.isEmpty { edited.insert(.purpose) }
             if !expense.date.isEmpty { edited.insert(.date) }
             editedFields[id] = edited
-            Task { await recognizeExpense(id: id, url: expense.sourceURL) }
+            scheduleRecognition(id: id, url: expense.sourceURL)
         }
     }
 
@@ -173,22 +204,41 @@ public struct ExpenseExportIssue: Identifiable {
     public func move(_ id: UUID, by offset: Int) {
         guard let index = expenses.firstIndex(where: { $0.id == id }),
               expenses.indices.contains(index + offset) else { return }
-        let expense = expenses.remove(at: index)
-        expenses.insert(expense, at: index + offset)
-        renumber()
+        moveToIndex(id, index + offset)
     }
 
     public func move(_ id: UUID, to targetID: UUID) {
         guard id != targetID,
-              let source = expenses.firstIndex(where: { $0.id == id }),
+              expenses.contains(where: { $0.id == id }),
               let target = expenses.firstIndex(where: { $0.id == targetID }) else { return }
+        moveToIndex(id, target)
+    }
+
+    private func moveToIndex(_ id: UUID, _ destination: Int) {
+        guard let source = expenses.firstIndex(where: { $0.id == id }), source != destination else { return }
         let expense = expenses.remove(at: source)
-        expenses.insert(expense, at: target)
+        expenses.insert(expense, at: min(max(0, destination), expenses.count))
         renumber()
+        registerUndo("调整顺序") { $0.moveToIndex(id, source) }
+    }
+
+    private struct DeletedExpense {
+        let expense: Expense
+        let index: Int
+        let fingerprint: Data?
+        let confirmed: Bool
+        let text: String?
+        let candidates: [AmountCandidate]?
+        let edited: Set<Field>?
+        let pending: Bool
     }
 
     public func delete(_ id: UUID) {
         guard let index = expenses.firstIndex(where: { $0.id == id }) else { return }
+        let deleted = DeletedExpense(expense: expenses[index], index: index, fingerprint: fingerprints[id],
+            confirmed: confirmedWarnings.contains(id), text: recognizedTexts[id], candidates: amountCandidates[id],
+            edited: editedFields[id], pending: pendingIDs.contains(id))
+        recognitionTokens.removeValue(forKey: id)
         let wasDuplicate = expenses[index].isDuplicate
         let fingerprint = fingerprints.removeValue(forKey: id)
         expenses.remove(at: index)
@@ -204,8 +254,41 @@ public struct ExpenseExportIssue: Identifiable {
             expenses[next].isDuplicate = false
             expenses[next].warning = "正在识别…"
             pendingIDs.insert(nextID)
-            Task { await recognizeExpense(id: nextID, url: expenses[next].sourceURL) }
+            scheduleRecognition(id: nextID, url: expenses[next].sourceURL)
         }
+        registerUndo("删除订单") { $0.restoreDeleted(deleted) }
+    }
+
+    private func restoreDeleted(_ deleted: DeletedExpense) {
+        let id = deleted.expense.id
+        guard !expenses.contains(where: { $0.id == id }) else { return }
+        expenses.insert(deleted.expense, at: min(deleted.index, expenses.count))
+        fingerprints[id] = deleted.fingerprint
+        if deleted.confirmed { confirmedWarnings.insert(id) }
+        recognizedTexts[id] = deleted.text
+        amountCandidates[id] = deleted.candidates
+        editedFields[id] = deleted.edited
+        if !deleted.expense.isDuplicate, let fingerprint = deleted.fingerprint {
+            for index in expenses.indices where expenses[index].id != id && fingerprints[expenses[index].id] == fingerprint {
+                let otherID = expenses[index].id
+                expenses[index].isDuplicate = true
+                expenses[index].warning = "重复截图，已排除在合计和导出之外。"
+                recognitionTokens.removeValue(forKey: otherID)
+                pendingIDs.remove(otherID)
+            }
+        }
+        renumber()
+        if deleted.pending {
+            pendingIDs.insert(id)
+            if deleted.fingerprint != nil {
+                scheduleRecognition(id: id, url: deleted.expense.sourceURL)
+            } else {
+                let token = UUID()
+                recognitionTokens[id] = token
+                Task { await processExpense(id: id, url: deleted.expense.sourceURL, token: token) }
+            }
+        }
+        registerUndo("删除订单") { $0.delete(id) }
     }
 
     public func selectCategory(_ category: ExpenseCategory, for id: UUID) {
@@ -232,19 +315,23 @@ public struct ExpenseExportIssue: Identifiable {
     }
 
     public func importFiles(_ urls: [URL]) {
-        let queued = urls.map { url in (queue(url), url) }
-        Task { for (id, url) in queued { await processExpense(id: id, url: url) } }
+        let queued = urls.map { url in
+            let id = queue(url)
+            return (id, url, recognitionTokens[id]!)
+        }
+        Task { for (id, url, token) in queued { await processExpense(id: id, url: url, token: token) } }
     }
 
     func importFile(_ url: URL) async {
         let id = queue(url)
-        await processExpense(id: id, url: url)
+        await processExpense(id: id, url: url, token: recognitionTokens[id]!)
     }
 
     func queue(_ url: URL) -> UUID {
         let expense = Expense(number: expenses.count + 1, sourceURL: url, warning: "正在识别…")
         expenses.append(expense)
         pendingIDs.insert(expense.id)
+        recognitionTokens[expense.id] = UUID()
         return expense.id
     }
 
@@ -280,40 +367,54 @@ public struct ExpenseExportIssue: Identifiable {
         editedFields.removeValue(forKey: id)
     }
 
-    private func processExpense(id: UUID, url: URL) async {
+    private func processExpense(id: UUID, url: URL, token: UUID) async {
+        guard recognitionTokens[id] == token else { return }
         do {
             let fingerprint = try await Task.detached(priority: .userInitiated) {
                 Data(SHA256.hash(data: try Data(contentsOf: url)))
             }.value
-            guard let index = expenses.firstIndex(where: { $0.id == id }) else { return }
+            guard recognitionTokens[id] == token,
+                  let index = expenses.firstIndex(where: { $0.id == id }) else { return }
             let unique = !fingerprints.values.contains(fingerprint)
             fingerprints[id] = fingerprint
             if !unique {
                 expenses[index].isDuplicate = true
                 expenses[index].warning = "重复截图，已排除在合计和导出之外。"
             } else {
-                await recognizeExpense(id: id, url: url)
+                await recognizeExpense(id: id, url: url, token: token)
             }
         } catch {
-            if let index = expenses.firstIndex(where: { $0.id == id }) {
+            if recognitionTokens[id] == token, let index = expenses.firstIndex(where: { $0.id == id }) {
                 expenses[index].warning = "识别失败：\(error.localizedDescription)。请手动填写并确认。"
             }
         }
+        guard recognitionTokens[id] == token else { return }
+        recognitionTokens.removeValue(forKey: id)
         pendingIDs.remove(id)
         editedFields.removeValue(forKey: id)
     }
 
-    private func recognizeExpense(id: UUID, url: URL) async {
+    private func scheduleRecognition(id: UUID, url: URL) {
+        let token = UUID()
+        recognitionTokens[id] = token
+        Task { await recognizeExpense(id: id, url: url, token: token) }
+    }
+
+    private func recognizeExpense(id: UUID, url: URL, token: UUID) async {
+        guard recognitionTokens[id] == token else { return }
         do {
             let suggestion = try await Task.detached(priority: .userInitiated) {
                 try await Recognition.recognize(url)
             }.value
+            guard recognitionTokens[id] == token else { return }
             applySuggestion(suggestion, to: id)
         } catch {
-            if let index = expenses.firstIndex(where: { $0.id == id }) {
+            if recognitionTokens[id] == token, let index = expenses.firstIndex(where: { $0.id == id }) {
                 expenses[index].warning = "识别失败：\(error.localizedDescription)。请手动填写并确认。"
             }
         }
+        guard recognitionTokens[id] == token else { return }
+        recognitionTokens.removeValue(forKey: id)
         pendingIDs.remove(id)
         editedFields.removeValue(forKey: id)
     }
