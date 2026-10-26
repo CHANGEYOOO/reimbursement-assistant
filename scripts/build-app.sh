@@ -41,8 +41,8 @@ cat > "$contents_dir/Info.plist" <<'PLIST'
     <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>CFBundleName</key><string>报销单助手</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>1.20</string>
-    <key>CFBundleVersion</key><string>24</string>
+    <key>CFBundleShortVersionString</key><string>1.21</string>
+    <key>CFBundleVersion</key><string>25</string>
     <key>LSMinimumSystemVersion</key><string>15.0</string>
     <key>NSHighResolutionCapable</key><true/>
 </dict>

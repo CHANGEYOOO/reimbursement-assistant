@@ -9,8 +9,9 @@ public struct ReviewView: View {
     @StateObject private var invoices = InvoiceStore()
     @StateObject private var controls = ReviewControls()
     @StateObject private var selection = ReviewSelection()
-    @StateObject private var inbox = InvoiceInboxStore()
-    @StateObject private var mailbox = MailboxSyncController()
+    @ObservedObject private var runtime = AppRuntime.shared
+    @ObservedObject private var inbox = AppRuntime.shared.inbox
+    @ObservedObject private var mailbox = AppRuntime.shared.mailbox
 
     public init() {}
 
@@ -57,7 +58,17 @@ public struct ReviewView: View {
                 }.frame(minWidth: 800, minHeight: 620)
             } else { projectContent }
         }
-        .onAppear { restoreDraft(); refreshProjects() }
+        .onAppear {
+            restoreDraft()
+            refreshProjects()
+            runtime.saveBeforeExit = {
+                controls.saveTask?.cancel()
+                saveCurrent()
+                return controls.saveStatus != "保存失败"
+            }
+            if runtime.inboxOpenRequest > 0 { openInbox(target: nil) }
+        }
+        .onChange(of: runtime.inboxOpenRequest) { _, _ in openInbox(target: nil) }
         .onReceive(store.objectWillChange) { _ in scheduleSave() }
         .onChange(of: invoices.lastError) { _, error in
             if let error { controls.errorMessage = error }
@@ -67,7 +78,6 @@ public struct ReviewView: View {
             do { try inbox.refreshAssignments() }
             catch { controls.errorMessage = error.localizedDescription }
         }
-        .task { await mailbox.run(inbox: inbox) }
         .sheet(isPresented: $controls.showingMailboxSettings) {
             QQMailboxSettingsView(close: { controls.showingMailboxSettings = false }, saved: {
                 mailbox.configurationChanged()

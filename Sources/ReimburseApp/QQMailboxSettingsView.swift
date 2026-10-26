@@ -4,11 +4,14 @@ import SwiftUI
 
 @MainActor final class MailboxSyncController: ObservableObject {
     @Published private(set) var syncing = false
+    @Published private(set) var lastSyncAt = UserDefaults.standard.object(forKey: "reimbursement.mail.lastSync." + QQMailboxConfiguration.address) as? Date
+    var onNewInvoices: ((Int, Bool) -> Void)?
     @Published private(set) var status = "连接 QQ 邮箱后，可自动收集发票邮件信息，附件按需下载。"
     @Published private(set) var manualMessages: [MailboxManualNotice] = []
 
     func configurationChanged() {
         manualMessages = Self.notices(account: QQMailboxConfiguration.address)
+        lastSyncAt = UserDefaults.standard.object(forKey: "reimbursement.mail.lastSync." + QQMailboxConfiguration.address) as? Date
         status = QQMailboxConfiguration.enabled ? "邮箱配置已保存，等待同步邮件信息。" : "自动收集已关闭，已有发票保留。"
     }
 
@@ -30,16 +33,25 @@ import SwiftUI
             let account = credentials.address
             let key = "reimbursement.mail.processed.\(account)"
             let processed = Set(UserDefaults.standard.stringArray(forKey: key) ?? [])
+            let since = QQMailboxConfiguration.since
+            let baselineKey = "reimbursement.mail.notificationSince.\(account)"
+            let pendingKey = "reimbursement.mail.pendingNotificationCount.\(account)"
+            let historical = InvoiceNotificationPolicy.isHistorical(since: since,
+                previousSince: UserDefaults.standard.object(forKey: baselineKey) as? Date)
             manualMessages = Self.notices(account: account)
             status = "正在收集发票邮件信息，不下载附件…"
-            let countBefore = inbox.items.count
-            try await QQMailboxClient.fetch(credentials: credentials, since: QQMailboxConfiguration.since,
+            try await QQMailboxClient.fetch(credentials: credentials, since: since,
                 excluding: processed) { message in
                 try await MainActor.run {
                     guard QQMailboxConfiguration.revision == revision, QQMailboxConfiguration.enabled else {
                         throw CancellationError()
                     }
-                    if !message.attachments.isEmpty { try inbox.registerRemote(message) }
+                    if !message.attachments.isEmpty {
+                        let before = inbox.items.count
+                        try inbox.registerRemote(message)
+                        let added = max(0, inbox.items.count - before)
+                        UserDefaults.standard.set(UserDefaults.standard.integer(forKey: pendingKey) + added, forKey: pendingKey)
+                    }
                     if message.attachments.isEmpty && message.hasDownloadLink {
                         if !self.manualMessages.contains(where: { $0.id == message.id }) {
                             self.manualMessages.append(MailboxManualNotice(id: message.id, subject: message.subject,
@@ -53,7 +65,13 @@ import SwiftUI
                 }
             }
             guard QQMailboxConfiguration.revision == revision else { status = "邮箱配置已变更，请重新同步。"; return }
-            status = "同步完成，新增 \(max(0, inbox.items.count - countBefore)) 张，附件未自动下载。"
+            lastSyncAt = Date()
+            UserDefaults.standard.set(lastSyncAt, forKey: "reimbursement.mail.lastSync.\(account)")
+            let pending = UserDefaults.standard.integer(forKey: pendingKey)
+            if pending > 0 { onNewInvoices?(pending, historical) }
+            UserDefaults.standard.set(0, forKey: pendingKey)
+            UserDefaults.standard.set(since, forKey: baselineKey)
+            status = "同步完成，新增 \(pending) 张，附件未自动下载。"
         } catch is CancellationError {
             status = "同步已停止，已收集的信息保留。"
         } catch {
@@ -88,6 +106,8 @@ struct QQMailboxSettingsView: View {
     let close: () -> Void
     let saved: () -> Void
     @StateObject private var state = QQMailboxSettingsState()
+    @ObservedObject private var notifications = AppRuntime.shared.notifications
+    @ObservedObject private var startup = AppRuntime.shared.startup
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -100,6 +120,18 @@ struct QQMailboxSettingsView: View {
             DatePicker("从这个日期开始收集", selection: $state.since, in: ...Date(), displayedComponents: .date)
             Text("软件运行且电脑联网、未休眠时，每 5 分钟检查一次。只读取邮件信息，不改变已读状态或删除邮件。附件仅在点击下载、预览或加入项目时取回；未下载前，金额和抬头可能暂时未知。")
                 .font(.callout).foregroundStyle(.secondary)
+            Divider()
+            Text("后台与提醒").font(.headline)
+            Toggle("收到新发票时通知我", isOn: Binding(get: { notifications.enabled }, set: { value in
+                Task { await notifications.setEnabled(value) }
+            }))
+            Toggle("登录 Mac 后自动启动", isOn: Binding(get: { startup.enabled }, set: { value in
+                Task { await startup.setEnabled(value) }
+            })).disabled(startup.working)
+            Text("以上开关即时生效。关闭主窗口后仍会后台收票；从顶部菜单栏选择退出或按 ⌘Q 才会停止。")
+                .font(.caption).foregroundStyle(.secondary)
+            if !notifications.permissionMessage.isEmpty { Text(notifications.permissionMessage).font(.caption).foregroundStyle(.secondary) }
+            if !startup.message.isEmpty { Text(startup.message).font(.caption).foregroundStyle(.secondary) }
             if !state.message.isEmpty { Text(state.message).font(.callout).textSelection(.enabled) }
             HStack {
                 Button(state.testing ? "正在测试…" : "测试连接") { state.test() }
