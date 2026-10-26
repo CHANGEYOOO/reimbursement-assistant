@@ -28,8 +28,8 @@ import Foundation
         store.applySemanticPayment(SemanticPayment(amount: nil, isCertain: false, reason: "两笔金额", candidates: [39, 49, 39]), to: expense.id)
         precondition(store.expenses[0].amount == nil && store.amountCandidates[expense.id]?.map(\.amount) == [39, 49])
         store.applySemanticDate(SemanticDate(date: nil, isCertain: false, reason: "日期有歧义", candidates: ["2026-10-20", "2026-10-26"]), to: expense.id)
-        precondition(store.expenses[0].date == "" && store.dateCandidates[expense.id]?.count == 2)
-        store.selectDateCandidate("2026-10-20", for: expense.id)
+        precondition(store.expenses[0].date == "2026-10-20" && store.dateCandidates[expense.id]?.isEmpty == true, "Approximate source-backed date fills without a click")
+        store.applySemanticDate(SemanticDate(date: "2026-10-26", isCertain: false, reason: "另一候选", candidates: []), to: expense.id)
         precondition(store.expenses[0].date == "2026-10-20")
         store.expenses[0].date = ""
         store.applySemanticPayment(SemanticPayment(amount: 49, isCertain: true, reason: "明确实付", candidates: [49]), to: expense.id)

@@ -11,7 +11,7 @@ struct AISettingsView: View {
             Text("AI 辅助识别设置").font(.title2)
             Toggle("启用 AI 辅助识别", isOn: $state.enabled)
                 .disabled(state.testing)
-            Text("保存并启用后，本地未识别的用途、金额或日期会自动交给 AI，当前待处理记录也会接续处理。仅发送识别文字；月日可按当前年份补全。明确结果直接填写并可导出，仍不确定的字段才需要处理。")
+            Text("保存并启用后，本地未识别的用途、金额或日期会自动交给 AI，当前待处理记录也会接续处理。仅发送识别文字；月日可按当前年份补全。明确结果直接填写并可导出；日期可自动采用有原文依据的参考日期，金额和用途仍不确定时才需要处理。")
                 .font(.callout).foregroundStyle(.secondary)
             Picker("服务商", selection: $state.provider) {
                 ForEach(AIProvider.allCases) { provider in Text(provider.title).tag(provider) }

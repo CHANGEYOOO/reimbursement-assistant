@@ -528,14 +528,15 @@ public struct ExpenseExportIssue: Identifiable {
     func applySemanticDate(_ result: SemanticDate, to id: UUID) {
         guard let index = expenses.firstIndex(where: { $0.id == id }), !expenses[index].isDuplicate,
               !ExpenseDate.isValid(expenses[index].date) else { return }
-        if result.isCertain, let date = result.date, ExpenseDate.isValid(date) {
+        let date = result.isCertain ? result.date : result.candidates.first(where: ExpenseDate.isValid) ?? result.date
+        if let date, ExpenseDate.isValid(date) {
             expenses[index].date = date
             dateCandidates[id] = []
             acceptAIResult(at: index, removing: [])
-            appendAINote("AI 建议日期 \(date)：\(result.reason)", to: id)
+            appendAINote("AI 已填写日期 \(date)\(result.isCertain ? "" : "（参考日期）")：\(result.reason)", to: id)
         } else {
             dateCandidates[id] = result.candidates.filter(ExpenseDate.isValid)
-            appendAINote("AI 尚不能确定支付日期，请选择候选或手动填写：\(result.reason)", to: id)
+            appendAINote("AI 未找到有效日期，请手动填写：\(result.reason)", to: id)
         }
     }
 

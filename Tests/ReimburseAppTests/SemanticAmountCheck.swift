@@ -99,6 +99,10 @@ import Foundation
 
         let falseDate = try result("支付日期2026年9月24日", date: "2026-10-26", dates: ["2026-10-26"])
         precondition(falseDate.transactionDate?.isCertain == false && falseDate.transactionDate?.candidates == ["2026-09-24"])
+        let approximate = try result("10月16日下单快照", dateCertainty: "uncertain", dates: ["2026-10-16"])
+        precondition(approximate.transactionDate?.candidates.first == "2026-10-16")
+        let preferredPaid = try result("下单日期2026-10-15\n支付日期2026-10-16", dateCertainty: "uncertain", dates: ["2026-10-15"])
+        precondition(preferredPaid.transactionDate?.candidates.first == "2026-10-16", "Payment evidence takes priority over approximate order dates")
         let competing = try result("支付日期2026-09-24\n支付日期2026-09-25", date: "2026-09-24")
         precondition(competing.transactionDate?.isCertain == false)
         let four = try result((1...7).map { "创建日期2026-09-\($0)" }.joined(separator: "\n"), dateCertainty: "uncertain")

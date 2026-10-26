@@ -221,7 +221,7 @@ public enum SemanticClassifier {
             taskInstruction += """
 
             同时判断本单支付/交易日期。本次参考公历年为\(Calendar(identifier: .gregorian).component(.year, from: referenceDate))。原文明示完整年份时必须保留，不得改成年份参考值；只有原文确实仅有月日时才按本次参考公历年补全年份，并在reason中说明。不得猜月日，不得用当前月日或文件日期，不得从订单号或金额中截取日期，无效完整日期也不能截取月日重新解释。
-            支付、付款、交易、扣款、转账或成交日期优先；下单、创建、配送、预计到达和开票日期不能充当支付日期。只有明确支付/交易标签及有效完整日期或可按规则补全年份的月日证据才为high；缺少这种依据时date=null、certainty=uncertain，可保留有效日期候选，最多4个。
+            支付、付款、交易、扣款、转账或成交日期优先；没有时可用下单、创建等订单相关日期作为大致参考日期。日期无需精确，但必须有原文依据。只有明确支付/交易标签及有效日期证据才为high；参考日期用certainty=uncertain，并将推荐日期放在候选首位，最多4个。有效候选会自动填入，无需用户点选。
             JSON增加字段："transaction_date":{"date":null,"certainty":"uncertain","reason":"简短依据","candidates":[]}。确定时date改为原文日期的YYYY-MM-DD字符串，certainty改为high；候选也用YYYY-MM-DD字符串。
             """
         }
@@ -457,6 +457,7 @@ public enum SemanticClassifier {
         if !certain {
             for candidate in evidence.paid.sorted() + evidence.all.subtracting(evidence.paid).sorted() where !candidates.contains(candidate) && candidates.count < 4 { candidates.append(candidate) }
         }
+        candidates = Array((evidence.paid.sorted() + candidates.filter { !evidence.paid.contains($0) }).prefix(4))
         let baseReason = proposed != nil && date == nil ? "AI 日期缺少有效原文依据，请人工确认" : reason
         return SemanticDate(date: date, isCertain: certain,
             reason: annotated(baseReason, dates: candidates + [date].compactMap { $0 }), candidates: candidates)
