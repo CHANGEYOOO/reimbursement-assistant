@@ -9,6 +9,8 @@ public struct ReviewView: View {
     @StateObject private var invoices = InvoiceStore()
     @StateObject private var controls = ReviewControls()
     @StateObject private var selection = ReviewSelection()
+    @StateObject private var inbox = InvoiceInboxStore()
+    @StateObject private var mailbox = MailboxSyncController()
 
     public init() {}
 
@@ -25,6 +27,117 @@ public struct ReviewView: View {
     }
 
     public var body: some View {
+        HSplitView {
+            sidebar.frame(minWidth: 180, idealWidth: 200, maxWidth: 250)
+            if controls.showingInbox {
+                VStack(spacing: 0) {
+                    if !mailbox.manualMessages.isEmpty {
+                        DisclosureGroup("\(mailbox.manualMessages.count) 封发票邮件未发现可导入附件") {
+                            ForEach(mailbox.manualMessages) { notice in
+                                HStack {
+                                    Text(notice.subject.isEmpty ? "无主题邮件" : notice.subject).lineLimit(1)
+                                    Text(notice.receivedAt, style: .date).foregroundStyle(.secondary)
+                                    Spacer()
+                                    Button("已手动处理") { mailbox.dismissNotice(notice.id) }
+                                }
+                            }
+                            Text("请在 QQ 邮箱查看这些邮件；可能需要通过邮件内链接下载，再手动导入。")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }.padding(.horizontal, 20).padding(.top, 12)
+                    }
+                    InvoiceInboxView(inbox: inbox, projects: controls.availableDrafts,
+                        targetProject: controls.inboxTarget,
+                        sync: { Task { await mailbox.sync(inbox: inbox) } },
+                        settings: { controls.showingMailboxSettings = true },
+                        syncing: mailbox.syncing, syncStatus: mailbox.status,
+                        assigned: {
+                            do { try invoices.refreshFromDisk() }
+                            catch { controls.errorMessage = error.localizedDescription }
+                        })
+                }.frame(minWidth: 800, minHeight: 620)
+            } else { projectContent }
+        }
+        .onAppear { restoreDraft(); refreshProjects() }
+        .onReceive(store.objectWillChange) { _ in scheduleSave() }
+        .onChange(of: invoices.lastError) { _, error in
+            if let error { controls.errorMessage = error }
+        }
+        .onChange(of: controls.draft) { _, _ in refreshProjects() }
+        .onChange(of: invoices.invoices.map(\.id)) { _, _ in
+            do { try inbox.refreshAssignments() }
+            catch { controls.errorMessage = error.localizedDescription }
+        }
+        .task { await mailbox.run(inbox: inbox) }
+        .sheet(isPresented: $controls.showingMailboxSettings) {
+            QQMailboxSettingsView(close: { controls.showingMailboxSettings = false }, saved: {
+                mailbox.configurationChanged()
+                Task { await mailbox.sync(inbox: inbox) }
+            })
+        }
+        .alert("操作未完成", isPresented: Binding(
+            get: { controls.errorMessage != nil },
+            set: { if !$0 { controls.errorMessage = nil } }
+        )) {
+            Button("确定", role: .cancel) { controls.errorMessage = nil }
+        } message: { Text(controls.errorMessage ?? "") }
+    }
+
+    private var sidebar: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("报销单助手").font(.headline).padding(.top, 12)
+            Button {
+                openInbox(target: nil)
+            } label: {
+                HStack {
+                    Label("发票箱", systemImage: "tray.full")
+                    Spacer()
+                    Text("\(inbox.items.filter { $0.projectID == nil }.count)").foregroundStyle(.secondary)
+                }.padding(8)
+                    .background(controls.showingInbox ? Color.accentColor.opacity(0.15) : .clear, in: RoundedRectangle(cornerRadius: 6))
+            }.buttonStyle(.plain)
+            Divider()
+            Text("我的项目").font(.caption).foregroundStyle(.secondary)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(controls.availableDrafts) { project in
+                        Button {
+                            controls.saveTask?.cancel()
+                            saveCurrent()
+                            guard controls.saveStatus != "保存失败" else { return }
+                            openDraft(project)
+                            controls.showingInbox = false
+                        } label: {
+                            Text(project.title).lineLimit(2).frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(8)
+                                .background(!controls.showingInbox && controls.draft?.id == project.id ? Color.accentColor.opacity(0.15) : .clear, in: RoundedRectangle(cornerRadius: 6))
+                        }.buttonStyle(.plain).disabled(controls.exportingInvoices)
+                    }
+                }
+            }
+            Button("＋ 新建项目") { createDraft(); refreshProjects() }
+                .disabled(controls.exportingInvoices)
+            Spacer(minLength: 0)
+        }.padding(12)
+    }
+
+    private func refreshProjects() {
+        do { controls.availableDrafts = try DraftStorage.list() }
+        catch { controls.errorMessage = "读取项目列表失败：\(error.localizedDescription)" }
+    }
+
+    private func openInbox(target: DraftSummary?) {
+        controls.saveTask?.cancel()
+        saveCurrent()
+        guard controls.saveStatus != "保存失败" else { return }
+        do {
+            try inbox.refreshAssignments()
+            refreshProjects()
+            controls.inboxTarget = target
+            controls.showingInbox = true
+        } catch { controls.errorMessage = error.localizedDescription }
+    }
+
+    private var projectContent: some View {
         ZStack {
             VStack(spacing: 12) {
                 HStack(spacing: 12) {
@@ -46,12 +159,13 @@ public struct ReviewView: View {
                 HStack(spacing: 12) {
                     Picker("区域", selection: $controls.showingInvoices) {
                         Text("订单截图").tag(false)
-                        Text("发票夹").tag(true)
+                        Text("项目发票夹").tag(true)
                     }
                     .pickerStyle(.segmented)
                     .frame(width: 240)
                     if controls.showingInvoices {
                         Button("导入发票") { chooseInvoices() }
+                        Button("从发票箱选择") { openInbox(target: controls.draft) }
                         Spacer()
                         Button(controls.exportingInvoices ? "正在导出…" : "导出发票文件夹") { exportInvoices() }
                             .disabled(invoices.invoices.isEmpty || controls.exportingInvoices || invoices.confirmationCount > 0)
@@ -236,7 +350,6 @@ public struct ReviewView: View {
             }
         }
         .onDrop(of: [.fileURL], isTargeted: $controls.isDropTarget, perform: importDroppedImages)
-        .onAppear(perform: restoreDraft)
         .onChange(of: visibleExpenses.map { $0.wrappedValue.id }) { previous, current in
             guard controls.onlyNeedsReview, let selectedID = selection.selectedID,
                   let expense = store.expenses.first(where: { $0.id == selectedID }),
@@ -252,10 +365,6 @@ public struct ReviewView: View {
             }
         }
         .onChange(of: controls.title) { _, _ in scheduleSave() }
-        .onReceive(store.objectWillChange) { _ in scheduleSave() }
-        .onChange(of: invoices.lastError) { _, error in
-            if let error { controls.errorMessage = error }
-        }
         .sheet(isPresented: $controls.showingExportIssues) {
             VStack(alignment: .leading, spacing: 12) {
                 Text("导出前需要处理的问题").font(.title2)
@@ -318,14 +427,6 @@ public struct ReviewView: View {
             }
             .padding()
             .frame(width: 680, height: 360)
-        }
-        .alert("操作未完成", isPresented: Binding(
-            get: { controls.errorMessage != nil },
-            set: { if !$0 { controls.errorMessage = nil } }
-        )) {
-            Button("确定", role: .cancel) { controls.errorMessage = nil }
-        } message: {
-            Text(controls.errorMessage ?? "")
         }
     }
 
@@ -396,11 +497,15 @@ public struct ReviewView: View {
         do {
             let created = try DraftStorage.create(title: "报销单")
             controls.draft = created
+            controls.previewURL = nil
+            selection.selectedID = nil
             store.reset()
             invoices.configure(directory: created.url)
             controls.title = created.title
             controls.saveStatus = "已保存"
             controls.showingInvoices = false
+            controls.showingInbox = false
+            controls.inboxTarget = nil
             controls.amountQuery = ""
             controls.onlyNeedsReview = false
         } catch { controls.errorMessage = "新建报销单失败：\(error.localizedDescription)" }
@@ -420,11 +525,15 @@ public struct ReviewView: View {
         controls.saveTask?.cancel()
         do {
             let opened = try DraftStorage.open(selected, into: store)
+            controls.previewURL = nil
+            selection.selectedID = nil
             controls.draft = opened
             invoices.configure(directory: opened.url)
             controls.title = opened.title
             controls.saveStatus = "已保存"
             controls.showingInvoices = false
+            controls.showingInbox = false
+            controls.inboxTarget = nil
             controls.amountQuery = ""
             controls.onlyNeedsReview = false
         } catch { controls.errorMessage = "打开草稿失败：\(error.localizedDescription)" }
@@ -617,6 +726,9 @@ private struct InvoiceRow: View {
 }
 
 @MainActor private final class ReviewControls: ObservableObject {
+    @Published var showingInbox = false
+    @Published var inboxTarget: DraftSummary?
+    @Published var showingMailboxSettings = false
     @Published var title = "报销单"
     @Published var previewURL: URL?
     @Published var errorMessage: String?

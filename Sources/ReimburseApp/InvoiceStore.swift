@@ -54,6 +54,15 @@ public struct Invoice: Identifiable, Codable, Sendable {
         }
     }
 
+    public func refreshFromDisk() throws {
+        guard let directory else { throw CocoaError(.fileNoSuchFile) }
+        let metadata = directory.appendingPathComponent("invoices.json")
+        guard FileManager.default.fileExists(atPath: metadata.path) else { return }
+        let stored = try JSONDecoder().decode([Invoice].self, from: Data(contentsOf: metadata))
+        let existing = Set(invoices.map(\.id))
+        invoices += stored.filter { !existing.contains($0.id) }
+    }
+
     public func sourceURL(for invoice: Invoice) -> URL {
         filesDirectory.appendingPathComponent(invoice.storedFilename)
     }
@@ -249,7 +258,7 @@ public struct Invoice: Identifiable, Codable, Sendable {
         return ["png", "jpg", "jpeg", "heic", "heif", "pdf"].contains(url.pathExtension.lowercased())
     }
 
-    private nonisolated static func amountInFilename(_ name: String) -> Decimal? {
+    nonisolated static func amountInFilename(_ name: String) -> Decimal? {
         let filename = name.replacingOccurrences(
             of: #"(?<!\d)(?:19|20)\d{2}[-._年]\d{1,2}[-._月]\d{1,2}日?(?!\d)|(?<!\d)(?:19|20)\d{6}(?!\d)"#,
             with: " ", options: .regularExpression)
@@ -271,7 +280,7 @@ public struct Invoice: Identifiable, Codable, Sendable {
         return nil
     }
 
-    private nonisolated static func recognizeTotal(at url: URL) throws -> Decimal? {
+    nonisolated static func recognizeTotal(at url: URL) throws -> Decimal? {
         if url.pathExtension.lowercased() == "pdf", let pdf = PDFDocument(url: url) {
             if let amount = totalAmount(in: pdf.string ?? "") { return amount }
             for index in 0..<min(pdf.pageCount, 3) {
@@ -286,6 +295,20 @@ public struct Invoice: Identifiable, Codable, Sendable {
         return try totalAmount(in: recognizedText(image))
     }
 
+    nonisolated static func invoiceText(at url: URL) throws -> String {
+        if url.pathExtension.lowercased() == "pdf", let pdf = PDFDocument(url: url) {
+            if let text = pdf.string, text.count > 30 { return text }
+            return try (0..<min(pdf.pageCount, 3)).compactMap { index in
+                guard let image = pdf.page(at: index)?.thumbnail(of: CGSize(width: 1800, height: 2400), for: .mediaBox)
+                    .cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
+                return try recognizedText(image)
+            }.joined(separator: "\n")
+        }
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else { return "" }
+        return try recognizedText(image)
+    }
+
     private nonisolated static func recognizedText(_ image: CGImage) throws -> String {
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate
@@ -295,7 +318,7 @@ public struct Invoice: Identifiable, Codable, Sendable {
         return (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }.joined(separator: "\n")
     }
 
-    private nonisolated static func totalAmount(in text: String) -> Decimal? {
+    nonisolated static func totalAmount(in text: String) -> Decimal? {
         let lines = text.components(separatedBy: .newlines)
         let amountPattern = #"[¥￥]\s*\d{1,9}(?:,\d{3})*(?:\.\d{1,2})?|\b\d{1,9}\.\d{2}\b"#
         let labels = ["价税合计", "合计金额", "发票金额"]
