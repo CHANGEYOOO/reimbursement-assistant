@@ -25,7 +25,6 @@ struct InvoiceInboxView: View {
     let projects: [DraftSummary]
     let targetProject: DraftSummary?
     let sync: () -> Void
-    let settings: () -> Void
     let syncing: Bool
     let syncStatus: String
     let assigned: () -> Void
@@ -52,7 +51,6 @@ struct InvoiceInboxView: View {
             HStack {
                 Text("发票箱").font(.title2.bold())
                 Spacer()
-                Button("邮箱设置", action: settings)
                 Button(syncing ? "同步中…" : "同步邮箱", action: sync).disabled(syncing)
                 Button("导入发票", action: importFiles)
             }

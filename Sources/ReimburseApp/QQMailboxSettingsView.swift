@@ -24,7 +24,7 @@ import SwiftUI
 
     func sync(inbox: InvoiceInboxStore) async {
         guard !syncing else { return }
-        guard QQMailboxConfiguration.enabled else { status = "请先在邮箱设置中连接并启用 QQ 邮箱。"; return }
+        guard QQMailboxConfiguration.enabled else { status = "请先在“设置 → QQ 邮箱”中连接并启用邮箱。"; return }
         syncing = true
         defer { syncing = false }
         let revision = QQMailboxConfiguration.revision
@@ -103,11 +103,8 @@ struct MailboxManualNotice: Identifiable, Codable {
 }
 
 struct QQMailboxSettingsView: View {
-    let close: () -> Void
     let saved: () -> Void
     @StateObject private var state = QQMailboxSettingsState()
-    @ObservedObject private var notifications = AppRuntime.shared.notifications
-    @ObservedObject private var startup = AppRuntime.shared.startup
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -120,34 +117,22 @@ struct QQMailboxSettingsView: View {
             DatePicker("从这个日期开始收集", selection: $state.since, in: ...Date(), displayedComponents: .date)
             Text("软件运行且电脑联网、未休眠时，每 5 分钟检查一次。只读取邮件信息，不改变已读状态或删除邮件。附件仅在点击下载、预览或加入项目时取回；未下载前，金额和抬头可能暂时未知。")
                 .font(.callout).foregroundStyle(.secondary)
-            Divider()
-            Text("后台与提醒").font(.headline)
-            Toggle("收到新发票时通知我", isOn: Binding(get: { notifications.enabled }, set: { value in
-                Task { await notifications.setEnabled(value) }
-            }))
-            Toggle("登录 Mac 后自动启动", isOn: Binding(get: { startup.enabled }, set: { value in
-                Task { await startup.setEnabled(value) }
-            })).disabled(startup.working)
-            Text("以上开关即时生效。关闭主窗口后仍会后台收票；从顶部菜单栏选择退出或按 ⌘Q 才会停止。")
-                .font(.caption).foregroundStyle(.secondary)
-            if !notifications.permissionMessage.isEmpty { Text(notifications.permissionMessage).font(.caption).foregroundStyle(.secondary) }
-            if !startup.message.isEmpty { Text(startup.message).font(.caption).foregroundStyle(.secondary) }
             if !state.message.isEmpty { Text(state.message).font(.callout).textSelection(.enabled) }
             HStack {
                 Button(state.testing ? "正在测试…" : "测试连接") { state.test() }
                 Spacer()
-                Button("取消", action: close)
                 Button("保存") {
                     do {
                         try QQMailboxConfiguration.save(address: state.address, authorizationCode: state.code,
                             enabled: state.enabled, since: state.since)
+                        state.code = ""
+                        state.message = "邮箱配置已保存。"
                         saved()
-                        close()
                     } catch { state.message = error.localizedDescription }
                 }.buttonStyle(.borderedProminent)
             }
         }
-        .padding(24).frame(width: 580)
+        .padding(24).frame(width: 620)
         .disabled(state.testing)
     }
 }

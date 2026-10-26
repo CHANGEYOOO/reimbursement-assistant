@@ -33,7 +33,7 @@ public enum SemanticError: LocalizedError {
         switch self {
         case .invalidEndpoint: "请填写完整的 HTTPS 接口地址，不要包含账号、密码、查询参数或片段。"
         case .invalidModel: "请填写有效的模型名称。"
-        case .missingKey: "请先在 AI 设置中填写 API Key。"
+        case .missingKey: "请先在“设置 → AI 辅助识别”中填写 API Key。"
         case .keychain(let status): "无法访问钥匙串中的 API Key（\(status)），请检查系统授权。"
         case .invalidResponse: "模型返回的分类格式无效，请重试或手动选择分类。"
         case .emptyText: "没有可供 AI 判断的识别文字。"

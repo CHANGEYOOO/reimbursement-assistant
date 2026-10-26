@@ -12,6 +12,7 @@ import SwiftUI
     let startup = LoginItemController()
     @Published private(set) var inboxOpenRequest = 0
     var saveBeforeExit: (() -> Bool)?
+    var aiConfigurationSaved: (() -> Void)?
     private var pollingTask: Task<Void, Never>?
     private var mainWindow: NSWindow?
     private var launchHidden = false
@@ -132,9 +133,8 @@ import SwiftUI
 struct BackgroundStatusMenu: View {
     @ObservedObject private var mailbox = AppRuntime.shared.mailbox
     @ObservedObject private var inbox = AppRuntime.shared.inbox
-    @ObservedObject private var notifications = AppRuntime.shared.notifications
-    @ObservedObject private var startup = AppRuntime.shared.startup
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.openSettings) private var openSettings
 
     var body: some View {
         Text("报销单助手")
@@ -151,17 +151,12 @@ struct BackgroundStatusMenu: View {
         }
         Button("立即同步") { Task { await mailbox.sync(inbox: inbox) } }
             .disabled(mailbox.syncing)
-        Toggle("新发票通知", isOn: Binding(get: { notifications.enabled }, set: { enabled in
-            Task { await notifications.setEnabled(enabled) }
-        }))
-        Toggle("登录 Mac 后自动启动", isOn: Binding(get: { startup.enabled }, set: { enabled in
-            Task { await startup.setEnabled(enabled) }
-        })).disabled(startup.working)
-        if !notifications.permissionMessage.isEmpty { Text(notifications.permissionMessage) }
-        if !startup.message.isEmpty { Text(startup.message) }
+        Button("设置…") {
+            NSApp.activate()
+            openSettings()
+        }
         Divider()
         Button("退出") { NSApp.terminate(nil) }.keyboardShortcut("q")
-        .onAppear { startup.refresh() }
     }
 }
 

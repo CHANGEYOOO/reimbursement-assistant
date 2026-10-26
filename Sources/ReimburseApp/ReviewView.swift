@@ -49,7 +49,6 @@ public struct ReviewView: View {
                     InvoiceInboxView(inbox: inbox, projects: controls.availableDrafts,
                         targetProject: controls.inboxTarget,
                         sync: { Task { await mailbox.sync(inbox: inbox) } },
-                        settings: { controls.showingMailboxSettings = true },
                         syncing: mailbox.syncing, syncStatus: mailbox.status,
                         assigned: {
                             do { try invoices.refreshFromDisk() }
@@ -66,6 +65,10 @@ public struct ReviewView: View {
                 saveCurrent()
                 return controls.saveStatus != "保存失败"
             }
+            runtime.aiConfigurationSaved = {
+                store.invalidateAIRequests()
+                store.automaticallyAssistUnresolvedExpenses()
+            }
             if runtime.inboxOpenRequest > 0 { openInbox(target: nil) }
         }
         .onChange(of: runtime.inboxOpenRequest) { _, _ in openInbox(target: nil) }
@@ -77,12 +80,6 @@ public struct ReviewView: View {
         .onChange(of: invoices.invoices.map(\.id)) { _, _ in
             do { try inbox.refreshAssignments() }
             catch { controls.errorMessage = error.localizedDescription }
-        }
-        .sheet(isPresented: $controls.showingMailboxSettings) {
-            QQMailboxSettingsView(close: { controls.showingMailboxSettings = false }, saved: {
-                mailbox.configurationChanged()
-                Task { await mailbox.sync(inbox: inbox) }
-            })
         }
         .alert("操作未完成", isPresented: Binding(
             get: { controls.errorMessage != nil },
@@ -127,6 +124,8 @@ public struct ReviewView: View {
             Button("＋ 新建项目") { createDraft(); refreshProjects() }
                 .disabled(controls.exportingInvoices)
             Spacer(minLength: 0)
+            Divider()
+            SettingsLink { Label("设置", systemImage: "gearshape") }
         }.padding(12)
     }
 
@@ -158,7 +157,6 @@ public struct ReviewView: View {
                     Text(controls.saveStatus).font(.caption).foregroundStyle(.secondary)
                     Spacer()
                     Button("新建报销单") { createDraft() }
-                    Button("AI 设置") { controls.showingAISettings = true }
                     Button("打开 / 管理报销单") { openDraftPicker() }
                         .disabled(controls.exportingInvoices)
                 }
@@ -405,12 +403,6 @@ public struct ReviewView: View {
             }
             .padding()
             .frame(width: 620, height: 380)
-        }
-        .sheet(isPresented: $controls.showingAISettings) {
-            AISettingsView(close: { controls.showingAISettings = false }, saved: {
-                store.invalidateAIRequests()
-                store.automaticallyAssistUnresolvedExpenses()
-            })
         }
         .sheet(isPresented: $controls.showingDrafts) {
             VStack(alignment: .leading, spacing: 12) {
@@ -738,7 +730,6 @@ private struct InvoiceRow: View {
 @MainActor private final class ReviewControls: ObservableObject {
     @Published var showingInbox = false
     @Published var inboxTarget: DraftSummary?
-    @Published var showingMailboxSettings = false
     @Published var title = "报销单"
     @Published var previewURL: URL?
     @Published var errorMessage: String?
@@ -746,7 +737,6 @@ private struct InvoiceRow: View {
     @Published var draft: DraftSummary?
     @Published var availableDrafts: [DraftSummary] = []
     @Published var showingDrafts = false
-    @Published var showingAISettings = false
     @Published var showingExportIssues = false
     @Published var scrollTargetID: UUID?
     @Published var showingInvoices = false

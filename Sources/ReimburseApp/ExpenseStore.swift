@@ -451,7 +451,7 @@ public struct ExpenseExportIssue: Identifiable {
         guard includeCategory || assessAmount || assessDate else { return }
         do {
             guard let configuration = try AIConfiguration.currentRequest() else {
-                aiNotes[id] = "请先在 AI 设置中配置并启用服务。"
+                aiNotes[id] = "请先在“设置 → AI 辅助识别”中配置并启用服务。"
                 return
             }
             let token = UUID()

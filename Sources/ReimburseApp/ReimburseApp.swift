@@ -10,6 +10,7 @@ public struct ReimburseApp: App {
             ReviewView()
                 .background(MainWindowAttachment(delegate: appDelegate).frame(width: 0, height: 0))
         }
+        Settings { AppSettingsView() }
         MenuBarExtra("报销单助手", systemImage: "doc.text.image") {
             BackgroundStatusMenu()
         }

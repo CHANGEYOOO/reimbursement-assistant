@@ -2,7 +2,6 @@ import Foundation
 import SwiftUI
 
 struct AISettingsView: View {
-    let close: () -> Void
     let saved: () -> Void
     @StateObject private var state = AISettingsState()
 
@@ -37,7 +36,6 @@ struct AISettingsView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             HStack {
-                Button("关闭", action: close).disabled(state.testing)
                 Spacer()
                 Button("保存当前配置") { if state.save() { saved() } }
                     .buttonStyle(.borderedProminent).disabled(state.testing)
@@ -45,7 +43,6 @@ struct AISettingsView: View {
         }
         .padding(24)
         .frame(width: 620, height: 510)
-        .onAppear { state.load() }
         .onChange(of: state.provider) { _, _ in state.load() }
     }
 }
@@ -58,6 +55,8 @@ struct AISettingsView: View {
     @Published var key = ""
     @Published var message = ""
     @Published var testing = false
+
+    init() { load() }
 
     func load() {
         let profile = AIConfiguration.profile(for: provider)
