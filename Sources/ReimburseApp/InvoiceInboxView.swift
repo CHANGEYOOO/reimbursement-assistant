@@ -149,6 +149,14 @@ struct InvoiceInboxView: View {
                 if let warning = item.warning { Text(warning).foregroundStyle(.orange).lineLimit(2) }
                 Spacer()
                 if !downloaded { Button("下载") { download(item) }.disabled(pending || controls.busy) }
+                if downloaded {
+                    Button("重新识别抬头") {
+                        Task {
+                            do { try await inbox.rerecognize(item.id) }
+                            catch { controls.error = error.localizedDescription }
+                        }
+                    }.disabled(pending || controls.busy)
+                }
                 Button(downloaded ? "预览" : "下载并预览") { preview(item) }.disabled(pending || controls.busy)
                 Button("修改金额与抬头") {
                     controls.amount = item.amount.map { NSDecimalNumber(decimal: $0).stringValue } ?? ""

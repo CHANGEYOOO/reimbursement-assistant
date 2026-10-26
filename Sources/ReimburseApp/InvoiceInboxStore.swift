@@ -101,7 +101,13 @@ private struct InboxSnapshot: Codable {
     @discardableResult public func download(_ id: UUID) async throws -> Set<UUID> {
         guard let item = items.first(where: { $0.id == id }) else { throw failure("发票不存在，请刷新后重试。") }
         if isDownloaded(item), !item.fingerprint.hasPrefix("remote:"), item.warning == nil,
-           (item.amount ?? .zero) > 0 { return [id] }
+           (item.amount ?? .zero) > 0 {
+            if item.buyerTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                do { try await rerecognize(id) }
+                catch { lastError = "发票已下载，抬头补充识别失败：\(error.localizedDescription)" }
+            }
+            return [id]
+        }
         guard !pendingIDs.contains(id) else { throw failure("该发票正在下载或识别，请稍后再试。") }
         pendingIDs.insert(id)
         defer { pendingIDs.remove(id) }
@@ -151,6 +157,27 @@ private struct InboxSnapshot: Codable {
         return [id]
     }
 
+    public func rerecognize(_ id: UUID) async throws {
+        guard let item = items.first(where: { $0.id == id }), isDownloaded(item) else {
+            throw failure("请先下载发票，再重新识别。")
+        }
+        guard !pendingIDs.contains(id) else { throw failure("该发票正在处理，请稍后再试。") }
+        pendingIDs.insert(id)
+        defer { pendingIDs.remove(id) }
+        try await recognize(id, at: sourceURL(for: item), namedAmount: item.amount, metadataOnly: true)
+    }
+
+    public func refreshMissingTitles() async {
+        guard canWrite else { return }
+        let ids = items.filter { isDownloaded($0) && $0.buyerTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            .map(\.id)
+        for id in ids where !pendingIDs.contains(id) {
+            guard !Task.isCancelled else { return }
+            do { try await rerecognize(id) }
+            catch { lastError = "补充识别发票抬头失败：\(error.localizedDescription)" }
+        }
+    }
+
     private func importData(_ data: Data, filename: String, receivedAt: Date, source: String, mailID: String?) async throws {
         guard !data.isEmpty, data.count <= 40 * 1024 * 1024 else { throw failure("发票文件为空或超过 40 MB。") }
         let name = URL(fileURLWithPath: filename).lastPathComponent
@@ -182,12 +209,16 @@ private struct InboxSnapshot: Codable {
         try await recognize(id, at: destination, namedAmount: amount)
     }
 
-    private func recognize(_ id: UUID, at destination: URL, namedAmount: Decimal?) async throws {
-        let text: String
+    private func recognize(_ id: UUID, at destination: URL, namedAmount: Decimal?, metadataOnly: Bool = false) async throws {
+        let result: (text: String, buyer: String, seller: String, item: String)
         do {
-            text = try await Task.detached(priority: .userInitiated) { try InvoiceStore.invoiceText(at: destination) }.value
+            result = try await Task.detached(priority: .userInitiated) {
+                let text = try InvoiceStore.invoiceText(at: destination)
+                let details = try InvoicePartyRecognition.details(at: destination, text: text)
+                return (text, details.buyer, details.seller, details.item)
+            }.value
         } catch {
-            if let index = items.firstIndex(where: { $0.id == id }) {
+            if !metadataOnly, let index = items.firstIndex(where: { $0.id == id }) {
                 var updated = items
                 updated[index].warning = "文字识别失败，请核对金额和抬头，或重试下载识别。"
                 try persist(updated)
@@ -197,14 +228,16 @@ private struct InboxSnapshot: Codable {
         }
         guard let index = items.firstIndex(where: { $0.id == id }) else { return }
         var updated = items
-        if !editedIDs.contains(id) {
-            updated[index].amount = namedAmount ?? InvoiceStore.totalAmount(in: text)
-            if updated[index].buyerTitle.isEmpty { updated[index].buyerTitle = Self.invoiceDetails(in: text).buyer }
+        if !metadataOnly, !editedIDs.contains(id) {
+            updated[index].amount = namedAmount ?? InvoiceStore.totalAmount(in: result.text)
         }
-        let details = Self.invoiceDetails(in: text)
-        updated[index].sellerTitle = details.seller
-        updated[index].itemDescription = details.item
-        updated[index].warning = (updated[index].amount ?? .zero) > 0 ? nil : "未识别到金额，请手动填写。"
+        // Money edits do not suppress title completion; an existing title is never overwritten.
+        if updated[index].buyerTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            updated[index].buyerTitle = result.buyer
+        }
+        if !metadataOnly || updated[index].sellerTitle.isEmpty { updated[index].sellerTitle = result.seller }
+        if !metadataOnly || updated[index].itemDescription.isEmpty { updated[index].itemDescription = result.item }
+        if !metadataOnly { updated[index].warning = (updated[index].amount ?? .zero) > 0 ? nil : "未识别到金额，请手动填写。" }
         try persist(updated)
         items = updated
     }
@@ -322,28 +355,7 @@ private struct InboxSnapshot: Codable {
     }
 
     nonisolated static func invoiceDetails(in text: String) -> (buyer: String, seller: String, item: String) {
-        let lines = text.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
-        func title(after labels: [String], until stops: [String]) -> String {
-            guard let start = lines.firstIndex(where: { line in labels.contains(where: line.contains) }) else { return "" }
-            let region = lines[start..<min(lines.count, start + 12)]
-            for line in region {
-                if stops.contains(where: line.contains) { break }
-                if let range = line.range(of: #"(?:名称|购买方|销售方|付款方|收款方)\s*[:：]\s*(.+)"#, options: .regularExpression) {
-                    let raw = String(line[range])
-                    if let colon = raw.firstIndex(where: { $0 == ":" || $0 == "：" }) {
-                        let value = raw[raw.index(after: colon)...].trimmingCharacters(in: .whitespacesAndNewlines)
-                        if !value.isEmpty && !value.contains("纳税人识别号") { return value }
-                    }
-                }
-                if (line.contains("公司") || line.contains("商行") || line.contains("经营部")) && !line.contains("税务") {
-                    return line.replacingOccurrences(of: "名称", with: "").trimmingCharacters(in: CharacterSet(charactersIn: ":： "))
-                }
-            }
-            return ""
-        }
-        return (title(after: ["购买方", "付款方"], until: ["销售方", "收款方", "货物", "项目名称"]),
-                title(after: ["销售方", "收款方"], until: ["购买方", "付款方", "备注", "开票人"]),
-                lines.first(where: { $0.contains("*") || $0.contains("＊") }) ?? "")
+        InvoicePartyRecognition.details(in: text)
     }
 
     nonisolated static func readArchive(_ data: Data) throws -> [(name: String, data: Data)] {

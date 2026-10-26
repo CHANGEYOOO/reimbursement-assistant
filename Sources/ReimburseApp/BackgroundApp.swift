@@ -23,6 +23,7 @@ import SwiftUI
         mailbox.onNewInvoices = { [weak self] count, historical in
             self?.notifications.notify(count: count, historical: historical)
         }
+        Task { await inbox.refreshMissingTitles() }
         pollingTask = Task { await mailbox.run(inbox: inbox) }
     }
 
