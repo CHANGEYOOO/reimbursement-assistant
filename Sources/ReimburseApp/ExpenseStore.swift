@@ -7,6 +7,7 @@ public enum ExpenseReviewStatus: String {
     case incomplete = "待补全"
     case needsReview = "待核对"
     case reviewed = "已核对"
+    case aiRecognized = "AI 已识别"
     case ready = "待人工核对"
     case duplicate = "重复"
 }
@@ -19,6 +20,11 @@ public struct ExpenseExportIssue: Identifiable {
 
 @MainActor public final class ExpenseStore: ObservableObject {
     enum Field: Hashable { case amount, purpose, category, date }
+    struct AutomaticAIPlan {
+        let category: Bool
+        let amount: Bool
+        let date: Bool
+    }
 
     @Published public var expenses: [Expense] = []
     @Published public private(set) var pendingIDs: Set<UUID> = []
@@ -111,6 +117,7 @@ public struct ExpenseExportIssue: Identifiable {
             // 旧草稿未记录数值来源，已保存的数值优先保留，避免覆盖历史人工填写。
             if expense.amount != nil { amountRevisions[expense.id] = 1 }
             if !expense.date.isEmpty { dateRevisions[expense.id] = 1 }
+            if !expense.purpose.isEmpty { categoryRevisions[expense.id] = 1 }
             if let data = try? Data(contentsOf: expense.sourceURL) {
                 fingerprints[expense.id] = Data(SHA256.hash(data: data))
             }
@@ -125,6 +132,7 @@ public struct ExpenseExportIssue: Identifiable {
             editedFields[id] = edited
             scheduleRecognition(id: id, url: expense.sourceURL)
         }
+        automaticallyAssistUnresolvedExpenses()
     }
 
     public var exportExpenses: [Expense] {
@@ -180,7 +188,8 @@ public struct ExpenseExportIssue: Identifiable {
         if pendingIDs.contains(expense.id) || aiPendingIDs.contains(expense.id) { return .processing }
         if !missingFields(for: expense).isEmpty { return .incomplete }
         if expense.warning != nil && !confirmedWarnings.contains(expense.id) { return .needsReview }
-        return confirmedWarnings.contains(expense.id) ? .reviewed : .ready
+        if confirmedWarnings.contains(expense.id) { return .reviewed }
+        return expense.aiRecognized == true ? .aiRecognized : .ready
     }
 
     public var exportIssues: [ExpenseExportIssue] {
@@ -378,6 +387,7 @@ public struct ExpenseExportIssue: Identifiable {
     }
 
     func markEdited(_ id: UUID, field: Field) {
+        if let index = expenses.firstIndex(where: { $0.id == id }) { expenses[index].aiRecognized = nil }
         if field == .category || field == .purpose { categoryRevisions[id, default: 0] += 1 }
         if field == .amount {
             amountRevisions[id, default: 0] += 1
@@ -392,12 +402,32 @@ public struct ExpenseExportIssue: Identifiable {
     }
 
     func needsAIAmount(_ expense: Expense) -> Bool {
-        if expense.amount == nil { return true }
+        if expense.amount == nil || expense.amount! <= 0 { return true }
         guard amountRevisions[expense.id, default: 0] == 0,
               !confirmedWarnings.contains(expense.id) else { return false }
         let warning = expense.warning ?? ""
         return ["仅识别到订单合计", "金额未标明实付", "金额未紧邻实付标识"].contains(where: warning.contains)
             || (amountCandidates[expense.id]?.count ?? 0) > 1
+    }
+
+    func automaticAIPlan(for id: UUID) -> AutomaticAIPlan? {
+        guard !pendingIDs.contains(id), !aiPendingIDs.contains(id),
+              let expense = expenses.first(where: { $0.id == id }), !expense.isDuplicate,
+              let text = recognizedTexts[id], !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        let category = expense.category == .uncategorized && categoryRevisions[id, default: 0] == 0
+        let amount = needsAIAmount(expense) && amountRevisions[id, default: 0] == 0
+        let date = !ExpenseDate.isValid(expense.date) && dateRevisions[id, default: 0] == 0
+        return category || amount || date ? AutomaticAIPlan(category: category, amount: amount, date: date) : nil
+    }
+
+    public func automaticallyAssistUnresolvedExpenses() {
+        guard AIConfiguration.enabled else { return }
+        for id in expenses.map(\.id) { automaticallyAssist(id) }
+    }
+
+    private func automaticallyAssist(_ id: UUID) {
+        guard AIConfiguration.enabled, let plan = automaticAIPlan(for: id) else { return }
+        classifyWithAI(id, includeCategory: plan.category, includeAmount: plan.amount, includeDate: plan.date)
     }
 
     public func classifyWithAI(_ id: UUID, includeCategory: Bool = true,
@@ -466,15 +496,15 @@ public struct ExpenseExportIssue: Identifiable {
         aiNotes[id] = [aiNotes[id], note].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "\n")
     }
 
-    private func requireAIReview(at index: Int, removing fragments: [String]) {
+    private func acceptAIResult(at index: Int, removing fragments: [String]) {
         let id = expenses[index].id
         confirmedWarnings.remove(id)
-        var warnings = (expenses[index].warning ?? "").components(separatedBy: "；")
+        let warnings = (expenses[index].warning ?? "").components(separatedBy: "；")
             .filter { warning in
                 !warning.isEmpty && !fragments.contains(where: warning.contains) && !warning.hasPrefix("AI")
             }
-        warnings.append("AI识别建议，请人工核对")
-        expenses[index].warning = warnings.joined(separator: "；")
+        expenses[index].warning = warnings.isEmpty ? nil : warnings.joined(separator: "；")
+        expenses[index].aiRecognized = true
     }
 
     func applySemanticPayment(_ payment: SemanticPayment, to id: UUID) {
@@ -484,7 +514,7 @@ public struct ExpenseExportIssue: Identifiable {
             expenses[index].amount = amount
             amountCandidates[id] = []
             aiAmountUpdates[id, default: 0] += 1
-            requireAIReview(at: index, removing: ["未能确定实付金额", "未标明实付", "金额未紧邻实付标识", "仅识别到订单合计", "多笔订单", "多个不同的实付金额", "多个不同的支出金额"])
+            acceptAIResult(at: index, removing: ["未能确定实付金额", "未标明实付", "金额未紧邻实付标识", "仅识别到订单合计", "多笔订单", "多个不同的实付金额", "多个不同的支出金额", "多个订单合计", "金额待核对"])
             appendAINote("AI 建议金额 ¥\(amount)：\(payment.reason)", to: id)
         } else {
             var candidates = payment.candidates.map { AmountCandidate(amount: $0, source: "AI候选：原文金额") }
@@ -501,7 +531,7 @@ public struct ExpenseExportIssue: Identifiable {
         if result.isCertain, let date = result.date, ExpenseDate.isValid(date) {
             expenses[index].date = date
             dateCandidates[id] = []
-            requireAIReview(at: index, removing: [])
+            acceptAIResult(at: index, removing: [])
             appendAINote("AI 建议日期 \(date)：\(result.reason)", to: id)
         } else {
             dateCandidates[id] = result.candidates.filter(ExpenseDate.isValid)
@@ -526,7 +556,7 @@ public struct ExpenseExportIssue: Identifiable {
                 expenses[index].purpose = result.category.rawValue + "费用"
             }
             expenses[index].category = result.category
-            requireAIReview(at: index, removing: ["用途分类待确认"])
+            acceptAIResult(at: index, removing: ["用途分类待确认"])
             appendAINote("AI 建议\(result.category.rawValue)：\(result.reason)", to: id)
         } else {
             appendAINote("AI 尚不能确定用途，请手动选择分类：\(result.reason)", to: id)
@@ -561,6 +591,7 @@ public struct ExpenseExportIssue: Identifiable {
 
     func applySuggestion(_ suggestion: Suggestion, to id: UUID) {
         guard let index = expenses.firstIndex(where: { $0.id == id }) else { return }
+        expenses[index].aiRecognized = nil
         let edited = editedFields[id] ?? []
         if !edited.contains(.amount) { expenses[index].amount = suggestion.amount }
         if !edited.contains(.category) { expenses[index].category = suggestion.category }
@@ -607,9 +638,6 @@ public struct ExpenseExportIssue: Identifiable {
 
     private func recognizeExpense(id: UUID, url: URL, token: UUID) async {
         guard recognitionTokens[id] == token else { return }
-        let restoredManualPurpose = editedFields[id]?.contains(.category) == true || editedFields[id]?.contains(.purpose) == true
-        let restoredManualAmount = editedFields[id]?.contains(.amount) == true
-        let restoredManualDate = editedFields[id]?.contains(.date) == true
         do {
             let suggestion = try await Task.detached(priority: .userInitiated) {
                 try await Recognition.recognize(url)
@@ -625,11 +653,6 @@ public struct ExpenseExportIssue: Identifiable {
         recognitionTokens.removeValue(forKey: id)
         pendingIDs.remove(id)
         editedFields.removeValue(forKey: id)
-        if let expense = expenses.first(where: { $0.id == id }), !confirmedWarnings.contains(id), AIConfiguration.enabled {
-            let category = expense.category == .uncategorized && !restoredManualPurpose && categoryRevisions[id, default: 0] == 0
-            let amount = needsAIAmount(expense) && !restoredManualAmount && amountRevisions[id, default: 0] == 0
-            let date = !ExpenseDate.isValid(expense.date) && !restoredManualDate && dateRevisions[id, default: 0] == 0
-            if category || amount || date { classifyWithAI(id, includeCategory: category, includeAmount: amount, includeDate: date) }
-        }
+        automaticallyAssist(id)
     }
 }

@@ -279,7 +279,10 @@ public struct ReviewView: View {
             .frame(width: 620, height: 380)
         }
         .sheet(isPresented: $controls.showingAISettings) {
-            AISettingsView(close: { controls.showingAISettings = false }, saved: { store.invalidateAIRequests() })
+            AISettingsView(close: { controls.showingAISettings = false }, saved: {
+                store.invalidateAIRequests()
+                store.automaticallyAssistUnresolvedExpenses()
+            })
         }
         .sheet(isPresented: $controls.showingDrafts) {
             VStack(alignment: .leading, spacing: 12) {
@@ -792,7 +795,7 @@ private struct ExpenseRow: View {
         switch store.status(for: expense) {
         case .processing: .blue
         case .incomplete, .needsReview, .ready: .orange
-        case .reviewed: .green
+        case .reviewed, .aiRecognized: .green
         case .duplicate: .secondary
         }
     }

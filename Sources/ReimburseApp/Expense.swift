@@ -19,6 +19,7 @@ public struct Expense: Identifiable, Codable, Sendable {
     public var date: String
     public var warning: String?
     public var isDuplicate: Bool
+    public var aiRecognized: Bool?
 
     public init(
         id: UUID = UUID(),
@@ -29,7 +30,8 @@ public struct Expense: Identifiable, Codable, Sendable {
         purpose: String = "",
         date: String = "",
         warning: String? = nil,
-        isDuplicate: Bool = false
+        isDuplicate: Bool = false,
+        aiRecognized: Bool? = nil
     ) {
         self.id = id
         self.number = number
@@ -40,6 +42,7 @@ public struct Expense: Identifiable, Codable, Sendable {
         self.date = date
         self.warning = warning
         self.isDuplicate = isDuplicate
+        self.aiRecognized = aiRecognized
     }
 }
 
