@@ -5,11 +5,20 @@ import Foundation
 public enum ExpenseReviewStatus: String {
     case processing = "识别中"
     case incomplete = "待补全"
-    case needsReview = "待核对"
+    case needsReview = "待处理"
     case reviewed = "已核对"
     case aiRecognized = "AI 已识别"
-    case ready = "待人工核对"
+    case ready = "可导出"
     case duplicate = "重复"
+
+    public var title: String {
+        switch self {
+        case .processing: "处理中"
+        case .incomplete, .needsReview: "待处理"
+        case .reviewed, .aiRecognized, .ready: "可导出"
+        case .duplicate: "重复"
+        }
+    }
 }
 
 public struct ExpenseExportIssue: Identifiable {
@@ -143,17 +152,20 @@ public struct ExpenseExportIssue: Identifiable {
         }
     }
 
-    public var total: Decimal {
-        exportExpenses.reduce(Decimal.zero) { sum, expense in
-            guard !pendingIDs.contains(expense.id),
-                  (expense.warning == nil || confirmedWarnings.contains(expense.id)),
-                  let amount = expense.amount, amount > 0 else { return sum }
-            return sum + amount
-        }
-    }
+    public var total: Decimal { amountTotal }
 
     public var amountTotal: Decimal {
         exportExpenses.reduce(Decimal.zero) { $0 + (($1.amount ?? .zero) > 0 ? ($1.amount ?? .zero) : .zero) }
+    }
+
+    public var hasUnresolvedAmounts: Bool {
+        expenses.contains { expense in
+            guard !expense.isDuplicate else { return false }
+            if pendingIDs.contains(expense.id) || aiPendingIDs.contains(expense.id) { return true }
+            if !(expense.amount.map { $0 > 0 } ?? false) { return true }
+            return !confirmedWarnings.contains(expense.id) &&
+                (needsAIAmount(expense) || (expense.warning?.contains("金额") == true))
+        }
     }
 
     public var reviewCount: Int {
@@ -175,7 +187,7 @@ public struct ExpenseExportIssue: Identifiable {
     public func issues(for expense: Expense) -> [String] {
         guard !expense.isDuplicate else { return [] }
         var reasons = pendingIDs.contains(expense.id) ? ["正在识别，请等待完成"] : []
-        if aiPendingIDs.contains(expense.id) { reasons.append("AI 正在判断用途，请等待完成或手动选择分类") }
+        if aiPendingIDs.contains(expense.id) { reasons.append("AI 正在识别，请等待完成或手动填写") }
         reasons += missingFields(for: expense)
         if let warning = expense.warning, !confirmedWarnings.contains(expense.id), !pendingIDs.contains(expense.id) {
             reasons.append("\(warning)；请人工核对")
@@ -394,10 +406,6 @@ public struct ExpenseExportIssue: Identifiable {
             aiAmountUpdates.removeValue(forKey: id)
         }
         if field == .date { dateRevisions[id, default: 0] += 1 }
-        if aiTokens.removeValue(forKey: id) != nil {
-            aiPendingIDs.remove(id)
-            aiNotes[id] = "已保留你的手动修改。"
-        }
         editedFields[id, default: []].insert(field)
     }
 
@@ -451,7 +459,6 @@ public struct ExpenseExportIssue: Identifiable {
             let revision = categoryRevisions[id, default: 0]
             let amountRevision = amountRevisions[id, default: 0]
             let dateRevision = dateRevisions[id, default: 0]
-            let wasConfirmed = confirmedWarnings.contains(id)
             aiTokens[id] = token
             aiPendingIDs.insert(id)
             aiNotes[id] = "AI 正在辅助识别…"
@@ -465,20 +472,10 @@ public struct ExpenseExportIssue: Identifiable {
                         finishAI(id)
                         return
                     }
-                    guard let current = expenses.first(where: { $0.id == id }),
-                          categoryRevisions[id, default: 0] == revision,
-                          amountRevisions[id, default: 0] == amountRevision,
-                          dateRevisions[id, default: 0] == dateRevision,
-                          current.amount == expense.amount, current.date == expense.date,
-                          confirmedWarnings.contains(id) == wasConfirmed else {
-                        aiNotes[id] = "已保留你在 AI 判断期间的手动修改。"
-                        finishAI(id)
-                        return
-                    }
                     aiNotes[id] = ""
-                    if includeCategory { applySemanticClassification(result, to: id) }
-                    if assessAmount, let payment = result.payment { applySemanticPayment(payment, to: id) }
-                    if assessDate, let date = result.transactionDate { applySemanticDate(date, to: id) }
+                    applyUneditedAIResult(result, original: expense,
+                        revisions: (revision, amountRevision, dateRevision), includeCategory: includeCategory,
+                        includeAmount: assessAmount, includeDate: assessDate)
                     if aiNotes[id]?.isEmpty != false { aiNotes[id] = "AI 未找到可确定的结果，请手动核对。" }
                 } catch {
                     guard aiTokens[id] == token else { return }
@@ -492,29 +489,58 @@ public struct ExpenseExportIssue: Identifiable {
         }
     }
 
+    func applyUneditedAIResult(_ result: SemanticClassification, original: Expense,
+                              revisions: (category: Int, amount: Int, date: Int),
+                              includeCategory: Bool, includeAmount: Bool, includeDate: Bool) {
+        let id = original.id
+        guard let current = expenses.first(where: { $0.id == id }), !current.isDuplicate else { return }
+        if includeCategory, categoryRevisions[id, default: 0] == revisions.category,
+           current.category == original.category, current.purpose == original.purpose {
+            applySemanticClassification(result, to: id)
+        }
+        if includeAmount, amountRevisions[id, default: 0] == revisions.amount,
+           current.amount == original.amount, let payment = result.payment {
+            applySemanticPayment(payment, to: id, alreadyRequested: true)
+        }
+        if includeDate, dateRevisions[id, default: 0] == revisions.date,
+           current.date == original.date, let date = result.transactionDate {
+            applySemanticDate(date, to: id)
+        }
+    }
+
     private func appendAINote(_ note: String, to id: UUID) {
         aiNotes[id] = [aiNotes[id], note].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "\n")
     }
 
+    private static let amountWarningFragments = ["未能确定实付金额", "未标明实付", "金额未紧邻实付标识", "仅识别到订单合计", "多笔订单", "多个不同的实付金额", "多个不同的支出金额", "多个订单合计", "金额待核对"]
+
     private func acceptAIResult(at index: Int, removing fragments: [String]) {
         let id = expenses[index].id
         confirmedWarnings.remove(id)
+        var resolved = fragments
+        if categoryRevisions[id, default: 0] > 0,
+           !expenses[index].purpose.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            resolved.append("用途分类待确认")
+        }
+        if amountRevisions[id, default: 0] > 0, expenses[index].amount.map({ $0 > 0 }) == true {
+            resolved += Self.amountWarningFragments
+        }
         let warnings = (expenses[index].warning ?? "").components(separatedBy: "；")
             .filter { warning in
-                !warning.isEmpty && !fragments.contains(where: warning.contains) && !warning.hasPrefix("AI")
+                !warning.isEmpty && !resolved.contains(where: warning.contains) && !warning.hasPrefix("AI")
             }
         expenses[index].warning = warnings.isEmpty ? nil : warnings.joined(separator: "；")
         expenses[index].aiRecognized = true
     }
 
-    func applySemanticPayment(_ payment: SemanticPayment, to id: UUID) {
+    func applySemanticPayment(_ payment: SemanticPayment, to id: UUID, alreadyRequested: Bool = false) {
         guard let index = expenses.firstIndex(where: { $0.id == id }), !expenses[index].isDuplicate,
-              needsAIAmount(expenses[index]) else { return }
+              alreadyRequested || needsAIAmount(expenses[index]) else { return }
         if payment.isCertain, let amount = payment.amount, amount > 0 {
             expenses[index].amount = amount
             amountCandidates[id] = []
             aiAmountUpdates[id, default: 0] += 1
-            acceptAIResult(at: index, removing: ["未能确定实付金额", "未标明实付", "金额未紧邻实付标识", "仅识别到订单合计", "多笔订单", "多个不同的实付金额", "多个不同的支出金额", "多个订单合计", "金额待核对"])
+            acceptAIResult(at: index, removing: Self.amountWarningFragments)
             appendAINote("AI 建议金额 ¥\(amount)：\(payment.reason)", to: id)
         } else {
             var candidates = payment.candidates.map { AmountCandidate(amount: $0, source: "AI候选：原文金额") }

@@ -40,7 +40,7 @@ private enum StoreChecks {
         store.expenses[0].amount = 25.5
         check(store.total == Decimal(string: "25.5")!, "edited amount updates total")
         store.expenses[0].warning = "金额待核对"
-        check(store.exportBlocker != nil && store.total == 0, "uncertain amount is excluded until review")
+        check(store.exportBlocker != nil && store.total == Decimal(string: "25.5")! && store.hasUnresolvedAmounts, "unresolved amount remains in the filled total but blocks export")
         store.confirmedWarnings.insert(store.expenses[0].id)
         check(store.exportBlocker == nil && store.total == Decimal(string: "25.5")!, "reviewed amount becomes exportable")
 

@@ -13,7 +13,9 @@ import Foundation
         var repeated = Expense(number: 2, sourceURL: image)
         repeated.isDuplicate = true
         store.expenses = [complete, repeated, incomplete, uncertain]
-        precondition(store.status(for: complete) == .ready)
+        precondition(store.status(for: complete) == .ready && store.status(for: complete).title == "可导出")
+        precondition(store.status(for: uncertain).title == "待处理")
+        precondition(store.total == store.amountTotal && store.total == 178 && store.hasUnresolvedAmounts)
         precondition(store.status(for: repeated) == .duplicate && store.issues(for: repeated).isEmpty)
         precondition(store.status(for: incomplete) == .incomplete && store.issues(for: incomplete).count == 3)
         precondition(store.status(for: uncertain) == .needsReview)

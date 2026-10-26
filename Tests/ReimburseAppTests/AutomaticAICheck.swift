@@ -52,6 +52,37 @@ import Foundation
         precondition(store.exportBlocker == nil && store.reviewCount == 0 && store.total == 39)
         precondition(!store.confirmedWarnings.contains(row.id), "AI must not claim a person checked the record")
         precondition(store.status(for: store.expenses[0]) == .aiRecognized)
+        store.reset()
+        store.expenses = [row]
+        store.expenses[0].warning = "未能确定实付金额，请人工填写；用途分类待确认"
+        store.selectCategory(.transport, for: row.id)
+        let result = SemanticClassification(category: .meals, isCertain: true, reason: "餐食",
+            payment: SemanticPayment(amount: 39, isCertain: true, reason: "实付", candidates: []),
+            transactionDate: SemanticDate(date: "2026-10-16", isCertain: false, reason: "下单日期", candidates: ["2026-10-16"]))
+        store.applyUneditedAIResult(result, original: row, revisions: (0, 0, 0),
+            includeCategory: true, includeAmount: true, includeDate: true)
+        precondition(store.expenses[0].category == .transport && store.expenses[0].amount == 39 && store.expenses[0].date == "2026-10-16",
+            "Editing category must preserve the category and still apply money/date")
+        precondition(store.exportBlocker == nil, "A manually resolved category warning must not return after AI fills other fields")
+        store.reset()
+        store.expenses = [row]
+        store.expenses[0].warning = "未能确定实付金额，请人工填写；用途分类待确认"
+        store.markEdited(row.id, field: .amount)
+        store.expenses[0].amount = 88
+        store.applyUneditedAIResult(result, original: row, revisions: (0, 0, 0),
+            includeCategory: true, includeAmount: true, includeDate: true)
+        precondition(store.expenses[0].amount == 88 && store.expenses[0].category == .meals && store.expenses[0].date == "2026-10-16",
+            "Editing money must not discard AI category/date")
+        precondition(store.exportBlocker == nil, "Resolved money warnings must not return after AI fills category/date")
+        store.reset()
+        var uncertainRow = row
+        uncertainRow.amount = 49
+        uncertainRow.warning = "仅识别到订单合计，未见实付标识，请人工核对"
+        store.expenses = [uncertainRow]
+        store.selectCategory(.transport, for: row.id)
+        store.applyUneditedAIResult(result, original: uncertainRow, revisions: (0, 0, 0),
+            includeCategory: true, includeAmount: true, includeDate: true)
+        precondition(store.expenses[0].amount == 39, "Manual category confirmation must not discard an already-requested uncertain amount")
         let encoded = try JSONEncoder().encode(store.expenses[0])
         let decoded = try JSONDecoder().decode(Expense.self, from: encoded)
         precondition(decoded.aiRecognized == true)

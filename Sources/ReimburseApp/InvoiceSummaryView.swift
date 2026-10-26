@@ -5,18 +5,20 @@ struct InvoiceSummaryView: View {
     let orderTotal: Decimal
     let invoiceTotal: Decimal
     let confirmationCount: Int
+    let hasUnresolvedAmounts: Bool
 
     private var difference: Decimal { orderTotal - invoiceTotal }
     private var statusColor: Color {
-        orderTotal > 0 && difference <= 0 && confirmationCount == 0 ? .green : .orange
+        orderTotal > 0 && difference <= 0 && confirmationCount == 0 && !hasUnresolvedAmounts ? .green : .orange
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .top, spacing: 20) {
-                metric("订单总额", value: money(orderTotal), color: .primary)
+                metric("已填订单总额", value: money(orderTotal), color: .primary)
                 metric("有效发票金额", value: money(invoiceTotal), color: .primary)
-                metric(difference > 0 ? "还需补足" : difference < 0 ? "超出金额" : "差额",
+                metric((difference > 0 ? "还需补足" : difference < 0 ? "超出金额" : "差额")
+                       + (hasUnresolvedAmounts ? "（暂估）" : ""),
                        value: money(abs(difference)), color: statusColor)
                 metric("待确认发票", value: "\(confirmationCount) 张", color: confirmationCount > 0 ? .orange : .primary)
             }
@@ -27,6 +29,7 @@ struct InvoiceSummaryView: View {
     }
 
     private var statusText: String {
+        if hasUnresolvedAmounts { return "订单金额仍有待处理项，发票差额暂估，处理完成后将自动更新" }
         if orderTotal <= 0 { return "请先录入订单金额" }
         if confirmationCount > 0 {
             return difference > 0 ? "仍有发票待确认，当前已确定金额尚未足额" : "已确定金额已足额，仍有发票待确认"

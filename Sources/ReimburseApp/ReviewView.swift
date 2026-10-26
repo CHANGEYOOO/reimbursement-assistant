@@ -74,7 +74,7 @@ public struct ReviewView: View {
                     if !controls.amountQuery.isEmpty {
                         Button("清空搜索") { controls.amountQuery = "" }
                     }
-                    Toggle("只看待核对", isOn: $controls.onlyNeedsReview)
+                    Toggle("只看待处理", isOn: $controls.onlyNeedsReview)
                         .toggleStyle(.checkbox)
                     Text("显示 \(visibleExpenses.count) / \(store.expenses.count) 笔")
                         .font(.caption).foregroundStyle(.secondary)
@@ -104,7 +104,9 @@ public struct ReviewView: View {
                 ScrollView {
                     LazyVStack(spacing: 0) {
                         if visibleExpenses.isEmpty && !store.expenses.isEmpty {
-                            Text("没有符合条件的订单，请调整搜索或筛选条件。")
+                            Text(controls.onlyNeedsReview && store.reviewCount == 0
+                                 ? "待处理问题已全部处理完毕"
+                                 : "没有符合条件的订单，请调整搜索或筛选条件。")
                                 .foregroundStyle(.secondary)
                                 .padding()
                         }
@@ -174,20 +176,13 @@ public struct ReviewView: View {
                 }
                 }
                 } else {
-                    HStack {
-                        Text("备用购买方抬头").font(.caption).foregroundStyle(.secondary)
-                        TextField("识别不到时使用", text: Binding(
-                            get: { invoices.companyTitleFallback },
-                            set: { invoices.updateCompanyTitleFallback($0) }
-                        ))
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 300)
-                        Spacer()
+                    if !controls.exportStatus.isEmpty {
                         Text(controls.exportStatus).font(.caption).foregroundStyle(.secondary)
+                            .padding(.horizontal)
                     }
-                    .padding(.horizontal)
                     InvoiceSummaryView(orderTotal: store.amountTotal, invoiceTotal: invoices.total,
-                                       confirmationCount: invoices.confirmationCount)
+                                       confirmationCount: invoices.confirmationCount,
+                                       hasUnresolvedAmounts: store.hasUnresolvedAmounts)
                         .padding(.horizontal)
                     invoiceList
                 }
@@ -197,7 +192,7 @@ public struct ReviewView: View {
                         Text("已导入发票 \(invoices.invoices.count) 张 · 原格式独立导出")
                             .font(.caption).foregroundStyle(.secondary)
                     } else {
-                        Text("已导入 \(store.expenses.count) 张 · 有效 \(store.exportExpenses.count) 笔 · 待核对 \(store.reviewCount) 笔 · 合计 ¥\(currency(store.total))")
+                        Text("已导入 \(store.expenses.count) 张 · 有效 \(store.exportExpenses.count) 笔 · 待处理 \(store.reviewCount) 笔 · 已填订单总额 ¥\(currency(store.total))")
                     }
                     Spacer()
                     if !controls.showingInvoices {
@@ -242,6 +237,20 @@ public struct ReviewView: View {
         }
         .onDrop(of: [.fileURL], isTargeted: $controls.isDropTarget, perform: importDroppedImages)
         .onAppear(perform: restoreDraft)
+        .onChange(of: visibleExpenses.map { $0.wrappedValue.id }) { previous, current in
+            guard controls.onlyNeedsReview, let selectedID = selection.selectedID,
+                  let expense = store.expenses.first(where: { $0.id == selectedID }),
+                  !store.needsReview(expense), !current.contains(selectedID),
+                  let previousIndex = previous.firstIndex(of: selectedID) else { return }
+            let next = previous.dropFirst(previousIndex + 1).first(where: current.contains)
+                ?? previous.prefix(previousIndex).reversed().first(where: current.contains)
+                ?? current.first
+            selection.selectedID = next
+            if let next {
+                controls.showingOrderPreview = true
+                controls.scrollTargetID = next
+            }
+        }
         .onChange(of: controls.title) { _, _ in scheduleSave() }
         .onReceive(store.objectWillChange) { _ in scheduleSave() }
         .onChange(of: invoices.lastError) { _, error in
@@ -491,9 +500,9 @@ public struct ReviewView: View {
         controls.exportStatus = ""
         Task {
             do {
-                let folders = try await invoices.exportGrouped(to: parent)
-                controls.exportStatus = "已导出 \(folders.count) 个文件夹"
-                NSWorkspace.shared.open(folders.count == 1 ? folders[0] : parent)
+                let folder = try await invoices.exportFolder(to: parent)
+                controls.exportStatus = "已导出发票文件夹"
+                NSWorkspace.shared.open(folder)
             } catch { controls.errorMessage = "导出发票失败：\(error.localizedDescription)" }
             controls.exportingInvoices = false
         }
@@ -678,11 +687,16 @@ private struct ExpenseRow: View {
                 ))
                     .textFieldStyle(.roundedBorder)
                 HStack {
-                    Text(store.status(for: expense).rawValue)
+                    Text(store.status(for: expense).title)
                         .font(.caption.weight(.medium))
                         .padding(.horizontal, 7).padding(.vertical, 3)
                         .foregroundStyle(statusColor)
                         .background(statusColor.opacity(0.12), in: Capsule())
+                    if store.confirmedWarnings.contains(expense.id) {
+                        Text("已人工核对").font(.caption).foregroundStyle(.secondary)
+                    } else if expense.aiRecognized == true {
+                        Text("AI 已识别").font(.caption).foregroundStyle(.secondary)
+                    }
                     Picker("分类", selection: Binding(
                         get: { expense.category },
                         set: { value in store.selectCategory(value, for: expense.id) }
@@ -794,8 +808,8 @@ private struct ExpenseRow: View {
     private var statusColor: Color {
         switch store.status(for: expense) {
         case .processing: .blue
-        case .incomplete, .needsReview, .ready: .orange
-        case .reviewed, .aiRecognized: .green
+        case .incomplete, .needsReview: .orange
+        case .reviewed, .aiRecognized, .ready: .green
         case .duplicate: .secondary
         }
     }

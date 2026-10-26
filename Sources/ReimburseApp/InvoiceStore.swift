@@ -19,7 +19,6 @@ public struct Invoice: Identifiable, Codable, Sendable {
     @Published public private(set) var invoices: [Invoice] = []
     @Published public private(set) var pendingIDs: Set<UUID> = []
     @Published public private(set) var lastError: String?
-    @Published public private(set) var companyTitleFallback = ""
 
     private var directory: URL?
     private var editedIDs: Set<UUID> = []
@@ -48,10 +47,8 @@ public struct Invoice: Identifiable, Codable, Sendable {
             let metadata = directory.appendingPathComponent("invoices.json")
             invoices = FileManager.default.fileExists(atPath: metadata.path)
                 ? try JSONDecoder().decode([Invoice].self, from: Data(contentsOf: metadata)) : []
-            companyTitleFallback = (try? String(contentsOf: directory.appendingPathComponent("invoice-company.txt"), encoding: .utf8)) ?? ""
         } catch {
             invoices = []
-            companyTitleFallback = ""
             self.directory = nil
             lastError = "读取发票夹失败：\(error.localizedDescription)"
         }
@@ -59,14 +56,6 @@ public struct Invoice: Identifiable, Codable, Sendable {
 
     public func sourceURL(for invoice: Invoice) -> URL {
         filesDirectory.appendingPathComponent(invoice.storedFilename)
-    }
-
-    public func updateCompanyTitleFallback(_ value: String) {
-        companyTitleFallback = value
-        guard let directory else { return }
-        do {
-            try value.write(to: directory.appendingPathComponent("invoice-company.txt"), atomically: true, encoding: .utf8)
-        } catch { lastError = "保存发票公司抬头失败：\(error.localizedDescription)" }
     }
 
     public func importFiles(_ urls: [URL]) {
@@ -192,28 +181,22 @@ public struct Invoice: Identifiable, Codable, Sendable {
         try save()
     }
 
-    public func exportGrouped(to parent: URL, date: Date = Date()) async throws -> [URL] {
+    public func exportFolder(to parent: URL, date: Date = Date()) async throws -> URL {
         guard pendingIDs.isEmpty else { throw NSError(domain: "InvoiceStore", code: 2, userInfo: [NSLocalizedDescriptionKey: "请等待发票识别完成。"]) }
         guard let directory else { throw CocoaError(.fileNoSuchFile) }
         let selected = invoices
-        var groups: [String: [Invoice]] = [:]
+        guard !selected.isEmpty else { throw NSError(domain: "InvoiceStore", code: 4, userInfo: [NSLocalizedDescriptionKey: "请先导入发票。"]) }
         for invoice in selected {
-            guard let amount = invoice.amount, amount > 0 else {
-                throw NSError(domain: "InvoiceStore", code: 3, userInfo: [NSLocalizedDescriptionKey: "请先填写发票金额：\(invoice.originalFilename)"])
+            guard !needsConfirmation(invoice) else {
+                throw NSError(domain: "InvoiceStore", code: 3, userInfo: [NSLocalizedDescriptionKey: "请先确认发票金额：\(invoice.originalFilename)"])
             }
             let source = directory.appendingPathComponent("invoices", isDirectory: true).appendingPathComponent(invoice.storedFilename)
             guard FileManager.default.fileExists(atPath: source.path) else {
                 throw NSError(domain: "InvoiceStore", code: 1, userInfo: [NSLocalizedDescriptionKey: "找不到发票文件：\(invoice.originalFilename)"])
             }
-            let detected = try await Task.detached(priority: .userInitiated) { try Self.buyerName(at: source) }.value
-            guard self.directory == directory else { throw CocoaError(.userCancelled) }
-            let buyer = (detected ?? companyTitleFallback).trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !buyer.isEmpty else {
-                throw NSError(domain: "InvoiceStore", code: 4, userInfo: [NSLocalizedDescriptionKey: "未识别到购买方抬头：\(invoice.originalFilename)。请在发票夹填写抬头。"])
-            }
-            groups[buyer, default: []].append(invoice)
         }
         let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
         formatter.dateFormat = "yyyy-MM-dd"
         let day = formatter.string(from: date)
         let money = NumberFormatter()
@@ -221,23 +204,17 @@ public struct Invoice: Identifiable, Codable, Sendable {
         money.minimumFractionDigits = 2
         money.maximumFractionDigits = 2
         money.usesGroupingSeparator = false
-        var exported: [URL] = []
-        for buyer in groups.keys.sorted() {
-            let group = groups[buyer]!
-            let total = group.reduce(Decimal.zero) { $0 + ($1.amount ?? .zero) }
-            let amount = money.string(from: total as NSDecimalNumber) ?? "0.00"
-            let safeBuyer = buyer.replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ":", with: "-")
-            let name = "\(day)-\(amount)-\(safeBuyer)"
-            var folder = parent.appendingPathComponent(name, isDirectory: true)
-            var suffix = 2
-            while FileManager.default.fileExists(atPath: folder.path) {
-                folder = parent.appendingPathComponent("\(name)(\(suffix))", isDirectory: true)
-                suffix += 1
-            }
-            try export(group, from: directory, to: folder)
-            exported.append(folder)
+        let total = selected.reduce(Decimal.zero) { $0 + ($1.amount ?? .zero) }
+        let amount = money.string(from: total as NSDecimalNumber) ?? "0.00"
+        let name = "\(day)-\(amount)"
+        var folder = parent.appendingPathComponent(name, isDirectory: true)
+        var suffix = 2
+        while FileManager.default.fileExists(atPath: folder.path) {
+            folder = parent.appendingPathComponent("\(name)(\(suffix))", isDirectory: true)
+            suffix += 1
         }
-        return exported
+        try export(selected, from: directory, to: folder)
+        return folder
     }
 
     private func export(_ selected: [Invoice], from directory: URL, to folder: URL) throws {
@@ -270,34 +247,6 @@ public struct Invoice: Identifiable, Codable, Sendable {
 
     private nonisolated static func isSupported(_ url: URL) -> Bool {
         return ["png", "jpg", "jpeg", "heic", "heif", "pdf"].contains(url.pathExtension.lowercased())
-    }
-
-    private nonisolated static func buyerName(at url: URL) throws -> String? {
-        if url.pathExtension.lowercased() == "pdf", let pdf = PDFDocument(url: url) {
-            if let name = buyerName(in: pdf.string ?? "") { return name }
-            guard let image = pdf.page(at: 0)?.thumbnail(of: CGSize(width: 1800, height: 2400), for: .mediaBox)
-                .cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
-            return try buyerName(in: recognizedText(image))
-        }
-        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
-              let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else { return nil }
-        return try buyerName(in: recognizedText(image))
-    }
-
-    private nonisolated static func buyerName(in text: String) -> String? {
-        let lines = text.components(separatedBy: .newlines)
-        for (index, rawLine) in lines.enumerated() {
-            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard line.hasPrefix("名称：") || line.hasPrefix("名称:") || line.hasPrefix("购买方名称：") else { continue }
-            let suffix = line.split(separator: "：", maxSplits: 1).dropFirst().first.map(String.init)
-                ?? line.split(separator: ":", maxSplits: 1).dropFirst().first.map(String.init) ?? ""
-            let candidate = suffix.isEmpty && index + 1 < lines.count ? lines[index + 1] : suffix
-            let name = candidate.components(separatedBy: "统一社会信用代码")[0]
-                .components(separatedBy: "纳税人识别号")[0]
-                .components(separatedBy: .whitespacesAndNewlines).joined()
-            if name.count >= 4 { return name }
-        }
-        return nil
     }
 
     private nonisolated static func amountInFilename(_ name: String) -> Decimal? {
