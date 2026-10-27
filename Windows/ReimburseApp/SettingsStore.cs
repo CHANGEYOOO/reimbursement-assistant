@@ -29,6 +29,10 @@ public sealed class AppSettings
     public bool StartupEnabled { get; set; }
     public double CacheLimitMb { get; set; } = 200;
 
+    public bool SameMailbox(AppSettings other) => MailEnabled == other.MailEnabled
+        && string.Equals(MailAddress.Trim(), other.MailAddress.Trim(), StringComparison.OrdinalIgnoreCase)
+        && MailPassword == other.MailPassword && MailSince == other.MailSince;
+
     public AppSettings Copy() => new()
     {
         AiEnabled = AiEnabled, AiProvider = AiProvider, AiEndpoint = AiEndpoint, AiModel = AiModel, ApiKey = ApiKey,

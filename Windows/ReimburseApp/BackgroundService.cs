@@ -15,7 +15,7 @@ public sealed class BackgroundService : IDisposable
     private CancellationTokenSource? _syncCancellation;
     private Task? _syncTask;
     private bool _disposed;
-    private bool _cacheCleanupPaused;
+    private AppSettings _mailConfiguration = AppSettings.Current.Copy();
     private MailboxState? _state;
     public Action? OpenSettings { get; set; }
     public event EventHandler? ExitRequested;
@@ -68,11 +68,15 @@ public sealed class BackgroundService : IDisposable
 
     public async Task SettingsChangedAsync()
     {
-        _syncCancellation?.Cancel();
-        if (_syncTask is { IsCompleted: false }) await _syncTask;
-        _cacheCleanupPaused = false;
-        SetStatus(AppSettings.Current.MailEnabled ? "邮箱配置已保存，正在同步…" : "自动收集已关闭，已有发票保留。");
-        if (AppSettings.Current.MailEnabled) await SyncAsync();
+        var mailChanged = !_mailConfiguration.SameMailbox(AppSettings.Current);
+        _mailConfiguration = AppSettings.Current.Copy();
+        if (mailChanged)
+        {
+            _syncCancellation?.Cancel();
+            if (_syncTask is { IsCompleted: false }) await _syncTask;
+            SetStatus(AppSettings.Current.MailEnabled ? "邮箱配置已保存，正在同步…" : "自动收集已关闭，已有发票保留。");
+            if (AppSettings.Current.MailEnabled) await SyncAsync();
+        }
         await MaintainCacheAsync();
     }
 
@@ -95,9 +99,9 @@ public sealed class BackgroundService : IDisposable
         using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
         _syncCancellation = cancellation;
         var ct = cancellation.Token;
-        var revision = AppSettings.Revision;
+        _mailConfiguration = settings.Copy();
         var account = settings.MailAddress.Trim().ToLowerInvariant();
-        bool Continue() => !_disposed && !ct.IsCancellationRequested && AppSettings.Revision == revision && AppSettings.Current.MailEnabled;
+        bool Continue() => !_disposed && !ct.IsCancellationRequested && settings.SameMailbox(AppSettings.Current) && AppSettings.Current.MailEnabled;
         try
         {
             var state = LoadState(account);
@@ -151,11 +155,10 @@ public sealed class BackgroundService : IDisposable
 
     private async Task MaintainCacheAsync()
     {
-        if (_disposed || _cacheCleanupPaused) return;
+        if (_disposed) return;
         try { await _repository.MaintainCacheAsync(); }
         catch (Exception ex)
         {
-            _cacheCleanupPaused = true;
             SetStatus("缓存自动清理已停止：" + ex.Message + " 请检查权限后在缓存设置中手动重试。");
         }
     }

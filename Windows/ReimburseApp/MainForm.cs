@@ -151,7 +151,7 @@ public sealed class MainForm : Form
         footer.Controls.Add(_summary); footer.Controls.Add(_blocker); footer.Controls.Add(_saveStatus);
         root.Controls.Add(footer, 0, 4);
         _title.TextChanged += (_, _) => { if (!_loadingProject) { _project.Title = _title.Text; UpdateSummary(); } };
-        _rows.Resize += (_, _) => ResizeRows();
+        _rows.Resize += (_, _) => { ResizeRows(); header.Padding = new Padding(8, 0, Math.Max(8, header.ClientSize.Width - RowWidth() + 8), 0); };
         _search.TextChanged += (_, _) => ApplyFilters();
         _onlyProblems.CheckedChanged += (_, _) => ApplyFilters();
         _projects.SelectedIndexChanged += (_, _) => { if (!_loadingProject && _projects.SelectedItem is ProjectRecord project) LoadProject(project); };
@@ -574,7 +574,7 @@ public sealed class MainForm : Form
         for (var i = 0; i < _expenses.Count; i++) _controls[_expenses[i].Id].Number.Text = (i + 1).ToString(CultureInfo.InvariantCulture);
     }
 
-    private int RowWidth() => Math.Max(520, _rows.ClientSize.Width - SystemInformation.VerticalScrollBarWidth - 6);
+    private int RowWidth() => Math.Max(520, _rows.ClientSize.Width - 6);
     private void ResizeRows() { foreach (var ui in _controls.Values) ui.Panel.Width = RowWidth(); }
 
     private string? Blocker()

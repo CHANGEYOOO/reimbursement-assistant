@@ -14,12 +14,20 @@ Architecture: extend the existing .NET 10 WinForms app. ProjectStore owns projec
 - Delete via Windows recycle bin. Development file deletion only /usr/bin/trash.
 
 ## Work
-- [ ] Freeze Mac baseline and create branch; establish shared types and build tools.
-- [ ] Port order recognition + AI prompts/output validation, same-text parity checks.
-- [ ] Implement invoice parsing/repository, strict allowlist, cache, project export and invoice workspace.
-- [ ] Implement encrypted settings, QQ IMAP, tray/background/notifications/startup settings.
-- [ ] Implement autosaved projects, complete order editor/search/review/preview/undo and integrate all modules.
-- [ ] Compile win-x64, run portable unit/fixture checks; Windows build/installer smoke checks where possible.
-- [ ] Package self-contained EXE installer, verify artifact and document real-device manual checks.
+- [x] Freeze Mac baseline and create branch; establish shared types and build tools.
+- [x] Port order recognition + AI prompts/output validation, same-text parity checks.
+- [x] Implement invoice parsing/repository, strict allowlist, cache, project export and invoice workspace.
+- [x] Implement encrypted settings, QQ IMAP, tray/background/notifications/startup settings.
+- [x] Implement autosaved projects, complete order editor/search/review/preview/undo and integrate all modules.
+- [x] Compile win-x64, run portable unit/fixture checks; Windows build/installer smoke checks where possible.
+- [x] Package self-contained EXE installer, verify artifact and document real-device manual checks.
 
 Non-goals: no GitHub release without request; no claim real Windows UI/OCR/QQ acceptance from Mac cross-compilation alone. No user data deletion or live mailbox/API calls in automated checks.
+
+## Verification record
+
+- Mac baseline tag: baseline-mac-1.27-windows-parity (d91b3fb); Mac runtime sources unchanged.
+- Windows CI native startup/OCR/autosave/Excel and installer embedded-payload SHA256 checks passed on multiple runs.
+- 27 same-text plus10 positioned-layout Mac reference fixtures; invoice allowlist/queue/project/cache checks; encrypted profile and mailbox-boundary checks.
+- Actual Windows installation/UAC/notifications/login startup, live QQ and paid AI are intentionally left for user manual acceptance.
+- Source remains on codex/windows-mac127-parity; no formal GitHub release created.

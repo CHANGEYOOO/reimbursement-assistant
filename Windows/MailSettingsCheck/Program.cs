@@ -14,6 +14,11 @@ internal static class MailSettingsChecks
             Reject(() => AppSettings.ValidateAi(endpoint, "model", "key"));
         Reject(() => AppSettings.ValidateAi("https://example.com/api", "two words", "key"));
         Reject(() => AppSettings.ValidateAi("https://example.com/api", "model", "bad\nkey"));
+        var mailbox = new AppSettings { MailEnabled = true, MailAddress = "one@qq.com", MailPassword = "fake-authorization" };
+        var unrelated = mailbox.Copy(); unrelated.NotificationsEnabled = true; unrelated.CacheLimitMb = 500; unrelated.AiEnabled = true;
+        Check(mailbox.SameMailbox(unrelated), "Notification, AI and cache settings must not interrupt mail sync");
+        unrelated.MailAddress = "two@qq.com";
+        Check(!mailbox.SameMailbox(unrelated), "Changing QQ account invalidates the old sync");
         var profiles = new AppSettings { AiEndpoint = "https://deepseek.example.invalid/chat/completions", AiModel = "saved-deepseek", ApiKey = "fake-deepseek-secret" };
         profiles.CaptureAiProfile();
         profiles.SelectAiProvider("阿里百炼");
