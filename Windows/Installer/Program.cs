@@ -80,9 +80,10 @@ internal static class Program
             var stage = ExtractVerifiedPayloadAsync(target, (_, _) => { }, preserveOnFailure: true).GetAwaiter().GetResult();
             using (var executable = File.OpenRead(Path.Combine(stage, AppExe)))
                 if (executable.ReadByte() != 'M' || executable.ReadByte() != 'Z') throw new InvalidDataException("Payload app is not a Windows executable.");
+            var requiredRuntime = RequiredRuntimeVersion(stage);
             var files = Directory.EnumerateFiles(stage, "*", System.IO.SearchOption.AllDirectories).ToList();
             var result = new { passed = true, payloadFiles = files.Count, bytes = files.Sum(file => new FileInfo(file).Length),
-                runtimeBundled = File.Exists(Path.Combine(stage, ".installer", "vc_redist.x64.exe")), fixtureDirectory = root,
+                runtimeBundled = File.Exists(Path.Combine(stage, ".installer", "vc_redist.x64.exe")), minimumVisualCppVersion = requiredRuntime.ToString(), fixtureDirectory = root,
                 checks = "Embedded ZIP path/size/duplicate/link validation, every file SHA256, Windows executable header, protected-data target rejection. No registry, UAC, installation, uninstall or user settings accessed." };
             Directory.CreateDirectory(Path.GetDirectoryName(report)!);
             File.WriteAllText(report, JsonSerializer.Serialize(result));
@@ -133,14 +134,24 @@ internal static class Program
         }
     }
 
-    internal static bool HasVisualCppRuntime()
+    private static Version RequiredRuntimeVersion(string stage)
     {
+        var file = Path.Combine(stage, ".installer", "vc_redist.x64.exe");
+        if (!File.Exists(file)) throw new IOException("安装包未包含 Microsoft Visual C++ 运行库，无法确定所需版本。请获取完整安装包。");
+        var version = FileVersionInfo.GetVersionInfo(file);
+        if (string.IsNullOrWhiteSpace(version.FileVersion) || version.FileMajorPart < 14 || version.FileMinorPart < 0)
+            throw new InvalidDataException("安装包中的 Microsoft Visual C++ 运行库版本信息无效，请重新下载完整安装包。");
+        return new Version(version.FileMajorPart, version.FileMinorPart);
+    }
+
+    internal static bool HasVisualCppRuntime(string stage)
+    {
+        var required = RequiredRuntimeVersion(stage);
         using var machine = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64);
         using var runtime = machine.OpenSubKey(@"SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64");
         if (runtime?.GetValue("Installed") is not int installed || installed != 1) return false;
-        var major = Convert.ToInt32(runtime.GetValue("Major") ?? 0);
-        var minor = Convert.ToInt32(runtime.GetValue("Minor") ?? 0);
-        return major > 14 || major == 14 && minor >= 29;
+        var installedVersion = new Version(Convert.ToInt32(runtime.GetValue("Major") ?? 0), Convert.ToInt32(runtime.GetValue("Minor") ?? 0));
+        return installedVersion >= required;
     }
 
     internal static async Task<string> ExtractVerifiedPayloadAsync(string target, Action<int, string> progress, bool preserveOnFailure = false)
@@ -189,14 +200,13 @@ internal static class Program
 
     internal static async Task InstallRuntimeAsync(string stage, bool consent)
     {
-        if (HasVisualCppRuntime()) return;
-        if (!consent) throw new InvalidOperationException("本机缺少截图识别需要的 Microsoft Visual C++ 运行库。请勾选安装运行库后重试。");
+        if (HasVisualCppRuntime(stage)) return;
+        if (!consent) throw new InvalidOperationException("本机的 Microsoft Visual C++ 运行库缺失或版本过旧。请勾选安装运行库后重试。");
         var runtime = Path.Combine(stage, ".installer", "vc_redist.x64.exe");
-        if (!File.Exists(runtime)) throw new IOException("安装包未包含 Microsoft Visual C++ 运行库，无法完成安装。请获取完整安装包。");
         var start = new ProcessStartInfo(runtime) { UseShellExecute = true, Verb = "runas", Arguments = "/install /quiet /norestart" };
         using var process = Process.Start(start) ?? throw new IOException("无法启动 Microsoft Visual C++ 运行库安装。");
         await process.WaitForExitAsync();
-        if (process.ExitCode is not (0 or 3010 or 1638) || !HasVisualCppRuntime())
+        if (process.ExitCode is not (0 or 3010 or 1638) || !HasVisualCppRuntime(stage))
             throw new IOException("Microsoft Visual C++ 运行库未安装成功。请完成或重启电脑后再安装本软件。");
     }
 

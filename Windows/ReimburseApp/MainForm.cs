@@ -100,10 +100,10 @@ public sealed class MainForm : Form
         var previewBox = new Panel { Dock = DockStyle.Fill, Padding = new Padding(8), BackColor = Color.FromArgb(246, 248, 250) };
         _previewScroll.Controls.Add(_preview);
         previewBox.Controls.Add(_previewScroll);
-        var zoomTools = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 34 };
+        var zoomTools = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 34, Name = "previewZoom" };
         foreach (var (text, change) in new[] { ("−", -0.5), ("适合宽度", 0.0), ("+", 0.5) })
         {
-            var button = new Button { Text = text, AutoSize = true };
+            var button = new Button { Text = text, Width = change == 0 ? 85 : 30, Height = 28, Margin = new Padding(2) };
             button.Click += (_, _) => { _previewZoom = change == 0 ? 1 : Math.Clamp(_previewZoom + change, 0.5, 3); ResizePreview(); };
             zoomTools.Controls.Add(button);
         }
@@ -641,6 +641,9 @@ public sealed class MainForm : Form
         if (reloaded.Projects.Single().Expenses.Single().Amount != 39m) throw new InvalidOperationException("自动保存读取不一致");
         Size = MinimumSize; Application.DoEvents();
         if (_controls[row.Id].Panel.Height < 200) throw new InvalidOperationException("订单操作区域高度不足");
+        var zoom = _orderSplit.Panel2.Controls.Find("previewZoom", true).Single();
+        if (zoom.Controls.Cast<Control>().Any(control => control.Right > zoom.ClientSize.Width || control.Bottom > zoom.ClientSize.Height)) throw new InvalidOperationException("截图缩放按钮被遮挡");
+        using (var screenshot = new Bitmap(Width, Height)) { DrawToBitmap(screenshot, new Rectangle(Point.Empty, Size)); screenshot.Save("build/windows-orders-smoke.png", ImageFormat.Png); }
         _exitRequested = true; Close();
     }
 

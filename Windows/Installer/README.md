@@ -6,7 +6,7 @@
 dotnet publish Windows/ReimburseApp/ReimburseApp.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o build/windows-payload
 ```
 
-2. 从微软官方下载并保留 `vc_redist.x64.exe`（`https://aka.ms/vs/17/release/vc_redist.x64.exe`）。构建者应核对其官方来源；安装时仅在缺少 VC++ 运行库时经用户同意执行，UAC 由 Windows 处理。
+2. 从微软官方下载并保留 `vc_redist.x64.exe`（`https://aka.ms/vs/17/release/vc_redist.x64.exe`）。构建者应核对其官方来源；安装时读取随包运行库的主次版本号，只有本机已安装相同或更新版本才跳过；需要补装或升级时经用户同意执行，UAC 由 Windows 处理。
 
 3. 生成嵌入清单和安装载荷。目标 ZIP 必须不存在；清理旧构建输出时遵守项目的废纸篓要求。
 
@@ -37,4 +37,4 @@ if ($process.ExitCode -ne 0) { throw "Installer payload self-check failed" }
 Get-Content C:\Temp\installer-check.json
 ```
 
-此模式只将嵌入载荷释放到随机 Windows 临时目录并逐文件检查路径、大小和 SHA-256，再检查主程序头及受保护目录拒绝规则；不读写注册表、不安装运行库、不执行安装或卸载、不访问用户项目和密钥。测试文件保留。
+此模式只将嵌入载荷释放到随机 Windows 临时目录并逐文件检查路径、大小和 SHA-256，再检查主程序头、随包运行库版本元数据及受保护目录拒绝规则；不读写注册表、不安装运行库、不执行安装或卸载、不访问用户项目和密钥。测试文件保留。

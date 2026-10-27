@@ -47,7 +47,9 @@ jobs:
         if: always()
         with:
           name: Windows-startup-diagnostics
-          path: build/windows-smoke.*
+          path: |
+            build/windows-smoke.*
+            build/windows-orders-smoke.png
           retention-days: 7
       - name: Package installer payload
         run: python scripts/package-windows-installer.py --payload-dir build/windows-app --runtime build/vc_redist.x64.exe --output build/windows-payload.zip
