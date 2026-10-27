@@ -37,12 +37,14 @@ struct InvoiceInboxView: View {
         inbox.items.filter { item in
             (controls.documentFilter == "发票" ? item.isAcceptedInvoice : controls.documentFilter == "待下载附件" ? !inbox.isDownloaded(item) && !item.isAcceptedInvoice && item.documentKind != .nonInvoice : inbox.isDownloaded(item) && !item.isAcceptedInvoice || item.documentKind == .nonInvoice) &&
             (controls.buyer == "全部抬头" || (controls.buyer == "抬头未知" ? item.buyerTitle.isEmpty : item.buyerTitle == controls.buyer)) &&
-            (controls.assignment == "全部状态" || (controls.assignment == "未分配" ? item.projectID == nil : item.projectID != nil)) &&
+            (controls.assignment == "全部状态" || (controls.assignment == "未加入" ? item.projectID == nil : item.projectID != nil)) &&
             (!controls.dateFilter || InvoiceInboxDates.contains(item.receivedAt, from: controls.start, through: controls.end))
         }.sorted { $0.receivedAt > $1.receivedAt }
     }
     private var selectable: Set<UUID> { Set(filtered.filter { !inbox.pendingIDs.contains($0.id) }.map(\.id)) }
     private var chosen: Set<UUID> { controls.selected.intersection(selectable).intersection(Set(inbox.items.filter { $0.projectID == nil && $0.isAcceptedInvoice }.map(\.id))) }
+    private var selectedItems: [InboxInvoice] { filtered.filter { controls.selected.contains($0.id) } }
+    private var selectedTotal: Decimal { selectedItems.filter { ($0.amount ?? .zero) > 0 }.reduce(.zero) { $0 + ($1.amount ?? .zero) } }
     private var monthGroups: [Date] { InvoiceInboxDates.months(filtered.map(\.receivedAt)) }
     private var joiningTitle: String {
         let downloads = inbox.items.contains { chosen.contains($0.id) && !inbox.isDownloaded($0) }
@@ -66,7 +68,12 @@ struct InvoiceInboxView: View {
                 Toggle("全选当前结果", isOn: Binding(get: { !selectable.isEmpty && selectable.isSubset(of: controls.selected) }, set: {
                     if $0 { controls.selected.formUnion(selectable) } else { controls.selected.subtract(selectable) }
                 })).toggleStyle(.checkbox)
-                Text("已选 \(controls.selected.intersection(Set(filtered.map(\.id))).count) 张").foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("已选 \(selectedItems.count) 张，合计 ¥\(selectedTotal.formatted(.number.precision(.fractionLength(2))))")
+                    if selectedItems.contains(where: { ($0.amount ?? .zero) <= 0 }) {
+                        Text("未填写有效金额的附件暂不计入合计").font(.caption)
+                    }
+                }.foregroundStyle(.secondary)
                 Spacer()
                 Button("删除所选", role: .destructive) {
                     controls.deleteIDs = controls.selected.intersection(Set(filtered.map(\.id)))
@@ -84,7 +91,7 @@ struct InvoiceInboxView: View {
                             .foregroundStyle(.secondary).frame(maxWidth: .infinity).padding(40)
                     }
                     ForEach(monthGroups, id: \.self) { group in
-                        Text(groupTitle(group)).font(.headline).padding(.top, 8)
+                        monthHeader(group)
                         LazyVGrid(columns: [GridItem(.adaptive(minimum: 340), alignment: .top)], alignment: .leading, spacing: 12) {
                             ForEach(filtered.filter { month($0.receivedAt) == group }) { item in card(item) }
                         }
@@ -126,7 +133,7 @@ struct InvoiceInboxView: View {
                     ForEach(Array(Set(inbox.items.map(\.buyerTitle).filter { !$0.isEmpty })).sorted(), id: \.self) { Text($0).tag($0) }
                 }.frame(maxWidth: 380)
                 Picker("分配状态", selection: $controls.assignment) {
-                    ForEach(["全部状态", "未分配", "已分配"], id: \.self) { Text($0).tag($0) }
+                    ForEach(["全部状态", "未加入", "已加入"], id: \.self) { Text($0).tag($0) }
                 }.frame(width: 210)
                 Spacer()
             }
@@ -138,6 +145,30 @@ struct InvoiceInboxView: View {
                 Spacer()
             }
         }
+    }
+
+    private func monthHeader(_ group: Date) -> some View {
+        let items = filtered.filter { month($0.receivedAt) == group }
+        let unassigned = items.filter { $0.projectID == nil && $0.isAcceptedInvoice }
+        let eligible = Set(unassigned.filter { !inbox.pendingIDs.contains($0.id) }.map(\.id))
+        let selected = controls.selected.intersection(eligible)
+        let all = !eligible.isEmpty && selected == eligible
+        return Button {
+            if all { controls.selected.subtract(eligible) }
+            else { controls.selected.formUnion(eligible) }
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: all ? "checkmark.square.fill" : selected.isEmpty ? "square" : "minus.square.fill")
+                    .foregroundStyle(eligible.isEmpty ? Color.secondary : Color.accentColor)
+                Text(groupTitle(group)).font(.headline)
+                Text("· \(items.count) 张 · \(unassigned.count) 张未加入").foregroundStyle(.secondary)
+            }.contentShape(Rectangle())
+        }
+        .buttonStyle(.plain).padding(.top, 8)
+        .disabled(eligible.isEmpty || controls.busy)
+        .accessibilityLabel("\(groupTitle(group))，选择该月未加入项目的发票")
+        .accessibilityValue(all ? "全部选中" : selected.isEmpty ? "未选中" : "部分选中")
+        .help("点击选择该月当前筛选下未加入项目的合格发票，再次点击取消")
     }
 
     private func card(_ item: InboxInvoice) -> some View {
@@ -164,7 +195,11 @@ struct InvoiceInboxView: View {
             Text("购买方：" + (item.buyerTitle.isEmpty ? (downloaded ? "抬头未知" : "下载后识别抬头") : item.buyerTitle))
             if !item.itemDescription.isEmpty { Text("内容：" + item.itemDescription).lineLimit(2) }
             HStack {
-                Text("归属项目：" + (item.projectID.map { id in projects.first(where: { $0.id == id })?.title ?? "已分配项目" } ?? "未分配"))
+                Text(item.projectID.map { id in "已加入 · " + (projects.first(where: { $0.id == id })?.title ?? "项目") } ?? "未加入项目")
+                    .font(.caption.weight(.medium))
+                    .padding(.horizontal, 8).padding(.vertical, 4)
+                    .foregroundStyle(item.projectID == nil ? Color.secondary : Color.green)
+                    .background(item.projectID == nil ? Color.primary.opacity(0.05) : Color.green.opacity(0.1), in: Capsule())
                 Spacer()
                 Text("来源：" + item.source).foregroundStyle(.secondary)
             }
