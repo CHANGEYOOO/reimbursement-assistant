@@ -2,6 +2,11 @@ import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
+private enum ReviewDestination: Hashable {
+    case inbox
+    case project(UUID)
+}
+
 private let expenseRowType = UTType(exportedAs: "top.kjoe.reimburse.expense-row")
 
 public struct ReviewView: View {
@@ -28,8 +33,9 @@ public struct ReviewView: View {
     }
 
     public var body: some View {
-        HSplitView {
-            sidebar.frame(minWidth: 180, idealWidth: 200, maxWidth: 250)
+        NavigationSplitView {
+            sidebar.navigationSplitViewColumnWidth(min: 180, ideal: 200, max: 280)
+        } detail: {
             if controls.showingInbox {
                 InvoiceMailboxContent(mailbox: mailbox) {
                     InvoiceInboxView(inbox: inbox, projects: controls.availableDrafts,
@@ -76,46 +82,62 @@ public struct ReviewView: View {
         } message: { Text(controls.errorMessage ?? "") }
     }
 
+    private var sidebarSelection: Binding<ReviewDestination?> {
+        Binding(
+            get: {
+                controls.showingInbox ? .inbox : controls.draft.map { .project($0.id) }
+            },
+            set: { destination in
+                switch destination {
+                case .inbox: openInbox(target: nil)
+                case .project(let id):
+                    guard !controls.exportingInvoices else { return }
+                    if let project = controls.availableDrafts.first(where: { $0.id == id }) {
+                        switchDraft(project)
+                    }
+                case nil: break
+                }
+            }
+        )
+    }
+
     private var sidebar: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("报销单助手").font(.headline).padding(.top, 12)
-            Button {
-                openInbox(target: nil)
-            } label: {
+        VStack(spacing: 0) {
+            List(selection: sidebarSelection) {
                 HStack {
                     Label("发票箱", systemImage: "tray.full")
                     Spacer()
-                    Text("\(inbox.items.filter { $0.projectID == nil && $0.isAcceptedInvoice }.count)").foregroundStyle(.secondary)
-                }.padding(8)
-                    .background(controls.showingInbox ? Color.accentColor.opacity(0.15) : .clear, in: RoundedRectangle(cornerRadius: 6))
-            }.buttonStyle(.plain)
-            Divider()
-            Text("报销项目（报销单）").font(.caption).foregroundStyle(.secondary)
-            ScrollView {
-                VStack(alignment: .leading, spacing: 4) {
+                    Text("\(inbox.items.filter { $0.projectID == nil && $0.isAcceptedInvoice }.count)")
+                        .foregroundStyle(.secondary)
+                }
+                .tag(ReviewDestination.inbox)
+                Section("报销项目（报销单）") {
                     ForEach(controls.availableDrafts) { project in
-                        Button {
-                            switchDraft(project)
-                            controls.showingInbox = false
-                        } label: {
-                            Text(project.title).lineLimit(2).frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(8)
-                                .background(!controls.showingInbox && controls.draft?.id == project.id ? Color.accentColor.opacity(0.15) : .clear, in: RoundedRectangle(cornerRadius: 6))
-                        }.buttonStyle(.plain).disabled(controls.exportingInvoices)
-                        .contextMenu {
-                            Button("打开") { switchDraft(project) }
-                            Button("重命名") { renameDraft(project) }
-                            Button("移入废纸篓", role: .destructive) { trashDraft(project) }
-                        }
+                        Text(project.title).lineLimit(2)
+                            .tag(ReviewDestination.project(project.id))
+                            .disabled(controls.exportingInvoices)
+                            .contextMenu {
+                                Button("打开") { switchDraft(project) }
+                                Button("重命名") { renameDraft(project) }
+                                Button("移入废纸篓", role: .destructive) { trashDraft(project) }
+                            }
                     }
                 }
             }
-            Button("＋ 新建项目") { createDraft(); refreshProjects() }
-                .disabled(controls.exportingInvoices)
-            Spacer(minLength: 0)
+            .listStyle(.sidebar)
             Divider()
-            SettingsLink { Label("设置", systemImage: "gearshape") }
-        }.padding(12)
+            HStack {
+                Button { createDraft(); refreshProjects() } label: {
+                    Label("新建项目", systemImage: "plus")
+                }
+                .disabled(controls.exportingInvoices)
+                Spacer()
+                SettingsLink { Image(systemName: "gearshape").accessibilityLabel("设置") }
+                    .help("设置")
+            }
+            .padding(12)
+        }
+        .navigationTitle("报销单助手")
     }
 
     private func refreshProjects() {
@@ -279,7 +301,7 @@ public struct ReviewView: View {
                         },
                         close: { controls.showingOrderPreview = false }
                     )
-                    .frame(minWidth: 260, idealWidth: 320, maxWidth: 500)
+                    .frame(minWidth: 300, idealWidth: 420, maxWidth: 800)
                 }
                 }
                 } else {
@@ -295,7 +317,7 @@ public struct ReviewView: View {
                         invoiceList.frame(minWidth: 650)
                         if let url = controls.invoicePreviewURL {
                             AttachmentSidePreview(url: url, title: "发票预览", close: { controls.invoicePreviewURL = nil })
-                                .frame(minWidth: 260, idealWidth: 320, maxWidth: 500)
+                                .frame(minWidth: 300, idealWidth: 420, maxWidth: 800)
                         }
                     }
                 }

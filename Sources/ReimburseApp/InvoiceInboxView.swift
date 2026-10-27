@@ -63,7 +63,7 @@ struct InvoiceInboxView: View {
             inboxContent.frame(minWidth: 650)
             if controls.previewID != nil {
                 AttachmentSidePreview(url: controls.previewURL, title: controls.previewTitle, close: closePreview)
-                    .frame(minWidth: 260, idealWidth: 320, maxWidth: 500)
+                    .frame(minWidth: 300, idealWidth: 420, maxWidth: 800)
             }
         }
         .onChange(of: mailDetailIsOpen) { _, open in if open { closePreview() } }
