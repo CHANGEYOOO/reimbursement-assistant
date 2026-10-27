@@ -43,7 +43,6 @@ public struct ReviewView: View {
                 }.frame(minWidth: 800, minHeight: 620)
             } else { projectContent }
         }
-        .attachmentPreviewHost(url: $controls.previewURL)
         .onAppear {
             restoreDraft()
             refreshProjects()
@@ -58,19 +57,6 @@ public struct ReviewView: View {
             }
             if runtime.inboxOpenRequest > 0 { openInbox(target: nil) }
         }
-        .onChange(of: controls.previewURL) { oldURL, newURL in
-            if let oldURL, let item = inbox.items.first(where: {
-                inbox.sourceURL(for: $0).standardizedFileURL == oldURL.standardizedFileURL
-            }) {
-                inbox.activeCacheIDs.remove(item.id)
-            }
-            if let newURL, let item = inbox.items.first(where: {
-                inbox.sourceURL(for: $0).standardizedFileURL == newURL.standardizedFileURL
-            }) {
-                inbox.activeCacheIDs.insert(item.id)
-            }
-            if newURL == nil { runtime.cache.scheduleMaintenance(protecting: []) }
-        }
         .onChange(of: runtime.inboxOpenRequest) { _, _ in openInbox(target: nil) }
         .onReceive(store.objectWillChange) { _ in scheduleSave() }
         .onChange(of: invoices.lastError) { _, error in
@@ -78,6 +64,7 @@ public struct ReviewView: View {
         }
         .onChange(of: controls.draft) { _, _ in refreshProjects() }
         .onChange(of: invoices.invoices.map(\.id)) { _, _ in
+            if let url = controls.invoicePreviewURL, !invoices.invoices.contains(where: { invoices.sourceURL(for: $0) == url }) { controls.invoicePreviewURL = nil }
             do { try inbox.refreshAssignments() }
             catch { controls.errorMessage = error.localizedDescription }
         }
@@ -233,12 +220,11 @@ public struct ReviewView: View {
                         }
                         ForEach(visibleExpenses) { $expense in
                             ExpenseRow(expense: $expense, store: store,
-                                showPreview: { controls.previewURL = expense.sourceURL },
+                                showPreview: { selection.selectedID = expense.id; controls.showingOrderPreview = true },
                                 delete: {
                                     if selection.selectedID == expense.id { selection.selectedID = nil }
                                     store.delete(expense.id)
                                 })
-                                .attachmentPreviewSource(url: expense.sourceURL)
                                 .id(expense.id)
                                 .contentShape(Rectangle())
                                 .background(selection.selectedID == expense.id ? Color.blue.opacity(0.18) : Color.clear)
@@ -291,7 +277,6 @@ public struct ReviewView: View {
                             $0.id == selection.selectedID && store.matchesFilters($0,
                                 amountQuery: controls.amountQuery, onlyNeedsReview: controls.onlyNeedsReview)
                         },
-                        enlarge: { controls.previewURL = $0 },
                         close: { controls.showingOrderPreview = false }
                     )
                     .frame(minWidth: 260, idealWidth: 320, maxWidth: 500)
@@ -306,7 +291,13 @@ public struct ReviewView: View {
                                        confirmationCount: invoices.confirmationCount,
                                        hasUnresolvedAmounts: store.hasUnresolvedAmounts)
                         .padding(.horizontal)
-                    invoiceList
+                    HSplitView {
+                        invoiceList.frame(minWidth: 650)
+                        if let url = controls.invoicePreviewURL {
+                            AttachmentSidePreview(url: url, title: "发票预览", close: { controls.invoicePreviewURL = nil })
+                                .frame(minWidth: 260, idealWidth: 320, maxWidth: 500)
+                        }
+                    }
                 }
 
                 HStack {
@@ -410,7 +401,7 @@ public struct ReviewView: View {
                 ForEach(invoices.acceptedInvoices) { invoice in
                     InvoiceRow(invoice: invoice, store: invoices,
                                preview: { url in
-                                   controls.previewURL = url
+                                   controls.invoicePreviewURL = url
                                },
                                reportError: { controls.errorMessage = $0 })
                     Divider()
@@ -470,7 +461,7 @@ public struct ReviewView: View {
         do {
             let created = try DraftStorage.create(title: "报销单")
             controls.draft = created
-            controls.previewURL = nil
+            controls.invoicePreviewURL = nil
             selection.selectedID = nil
             store.reset()
             invoices.configure(directory: created.url)
@@ -500,7 +491,7 @@ public struct ReviewView: View {
         controls.saveTask?.cancel()
         do {
             let opened = try DraftStorage.open(selected, into: store)
-            controls.previewURL = nil
+            controls.invoicePreviewURL = nil
             selection.selectedID = nil
             controls.draft = opened
             invoices.configure(directory: opened.url)
@@ -560,7 +551,7 @@ public struct ReviewView: View {
             try DraftStorage.moveToTrash(selected)
             if controls.draft?.id == selected.id {
                 controls.draft = nil
-                controls.previewURL = nil
+                controls.invoicePreviewURL = nil
                 selection.selectedID = nil
                 store.reset()
                 let remaining = try DraftStorage.list()
@@ -711,7 +702,7 @@ private struct InvoiceRow: View {
     @Published var showingInbox = false
     @Published var inboxTarget: DraftSummary?
     @Published var title = "报销单"
-    @Published var previewURL: URL?
+    @Published var invoicePreviewURL: URL?
     @Published var errorMessage: String?
     @Published var isDropTarget = false
     @Published var draft: DraftSummary?
@@ -844,7 +835,7 @@ private struct ExpenseRow: View {
             }
             .buttonStyle(.plain)
             .frame(width: 160)
-            .accessibilityLabel("放大第\(expense.number)张截图")
+            .accessibilityLabel("在右侧预览第\(expense.number)张截图")
             VStack(alignment: .leading, spacing: 5) {
                 TextField("金额", text: Binding(
                     get: { amountDraft.text },

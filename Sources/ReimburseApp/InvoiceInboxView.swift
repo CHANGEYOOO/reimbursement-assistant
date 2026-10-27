@@ -6,6 +6,10 @@ import UniformTypeIdentifiers
 @MainActor private final class InvoiceInboxControls: ObservableObject {
     @Published var selected: Set<UUID> = []
     var previewRequest: UUID?
+    var assigningIDs: Set<UUID> = []
+    @Published var previewID: UUID?
+    @Published var previewURL: URL?
+    @Published var previewTitle = ""
     @Published var buyer = "全部抬头"
     @Published var assignment = "全部状态"
     @Published var dateFilter = false
@@ -32,7 +36,8 @@ struct InvoiceInboxView: View {
     let syncStatus: String
     let assigned: () -> Void
     @StateObject private var controls = InvoiceInboxControls()
-    @Environment(\.attachmentPreview) private var openPreview
+    @Environment(\.mailDetailIsOpen) private var mailDetailIsOpen
+    @Environment(\.closeMailDetail) private var closeMailDetail
 
     private var filtered: [InboxInvoice] {
         inbox.items.filter { item in
@@ -54,6 +59,21 @@ struct InvoiceInboxView: View {
     }
 
     var body: some View {
+        HSplitView {
+            inboxContent.frame(minWidth: 650)
+            if controls.previewID != nil {
+                AttachmentSidePreview(url: controls.previewURL, title: controls.previewTitle, close: closePreview)
+                    .frame(minWidth: 260, idealWidth: 320, maxWidth: 500)
+            }
+        }
+        .onChange(of: mailDetailIsOpen) { _, open in if open { closePreview() } }
+        .onDisappear { closePreview() }
+        .onChange(of: inbox.items.map(\.id)) { _, ids in
+            if let id = controls.previewID, !ids.contains(id) { closePreview() }
+        }
+    }
+
+    private var inboxContent: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
                 Text("发票箱").font(.title2.bold())
@@ -102,13 +122,13 @@ struct InvoiceInboxView: View {
         }
         .padding(20)
         .overlay { if controls.dropTarget { RoundedRectangle(cornerRadius: 10).stroke(Color.accentColor, lineWidth: 3).allowsHitTesting(false) } }
-        .onDisappear { controls.previewRequest = nil }
         .onDrop(of: [.fileURL], isTargeted: $controls.dropTarget, perform: dropped)
         .sheet(isPresented: $controls.choosingProject) { projectSheet }
         .sheet(item: $controls.edit) { _ in editSheet }
         .confirmationDialog("删除所选发票箱记录？", isPresented: $controls.confirmingDelete, titleVisibility: .visible) {
             Button("删除记录并将缓存移入废纸篓", role: .destructive) {
                 do {
+                    if let id = controls.previewID, controls.deleteIDs.contains(id) { closePreview() }
                     try inbox.delete(ids: controls.deleteIDs)
                     controls.selected.subtract(controls.deleteIDs)
                 } catch { controls.error = error.localizedDescription }
@@ -181,7 +201,6 @@ struct InvoiceInboxView: View {
                 Button { preview(item) } label: {
                     AttachmentThumbnail(url: inbox.sourceURL(for: item), downloaded: downloaded)
                 }.buttonStyle(.plain).disabled(pending || controls.busy)
-                    .attachmentPreviewSource(url: inbox.sourceURL(for: item))
                     .accessibilityLabel("预览发票附件")
                 VStack(alignment: .leading, spacing: 5) {
                     Button { preview(item) } label: {
@@ -225,6 +244,11 @@ struct InvoiceInboxView: View {
         }
         .font(.callout).padding(16)
         .background(controls.selected.contains(item.id) ? Color.accentColor.opacity(0.08) : Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 8))
+        .overlay {
+            if controls.previewID == item.id {
+                RoundedRectangle(cornerRadius: 8).stroke(Color.accentColor.opacity(0.65), lineWidth: 1)
+            }
+        }
     }
 
     private var projectSheet: some View {
@@ -269,24 +293,56 @@ struct InvoiceInboxView: View {
     private func download(_ item: InboxInvoice) {
         Task { do { try await inbox.download(item.id) } catch { controls.error = error.localizedDescription } }
     }
+    private func closePreview() {
+        controls.previewRequest = nil
+        if let id = controls.previewID, !controls.assigningIDs.contains(id) { inbox.activeCacheIDs.remove(id) }
+        controls.previewID = nil
+        controls.previewURL = nil
+        controls.previewTitle = ""
+        inbox.onCacheChanged?([])
+    }
     private func preview(_ item: InboxInvoice) {
+        closeMailDetail()
+        guard !controls.busy else { return }
+        if controls.previewID == item.id, controls.previewURL != nil || controls.previewRequest != nil { return }
+        closePreview()
         let request = UUID()
         controls.previewRequest = request
+        controls.previewID = item.id
+        controls.previewTitle = "正在载入 · " + item.originalFilename
+        inbox.activeCacheIDs.insert(item.id)
         Task {
             do {
                 let downloadedIDs = try await inbox.download(item.id)
-                guard controls.previewRequest == request, downloadedIDs.contains(item.id) else { return }
-                let url = inbox.sourceURL(for: item)
-                openPreview(url)
-            } catch { if controls.previewRequest == request { controls.error = error.localizedDescription } }
+                guard controls.previewRequest == request else { return }
+                controls.previewRequest = nil
+                controls.previewTitle = item.originalFilename
+                guard downloadedIDs.contains(item.id) else {
+                    controls.error = "附件已展开，请选择其中的发票查看。"
+                    closePreview()
+                    return
+                }
+                controls.previewURL = inbox.sourceURL(for: item)
+            } catch {
+                guard controls.previewRequest == request else { return }
+                controls.previewRequest = nil
+                controls.previewTitle = item.originalFilename
+                controls.error = error.localizedDescription
+            }
         }
     }
     private func assign(to project: DraftSummary) {
         let ids = chosen
         controls.busy = true
+        controls.assigningIDs = ids
         inbox.activeCacheIDs.formUnion(ids)
         Task {
-            defer { controls.busy = false; inbox.activeCacheIDs.subtract(ids) }
+            defer {
+                controls.busy = false
+                controls.assigningIDs = []
+                inbox.activeCacheIDs.subtract(ids)
+                if let id = controls.previewID { inbox.activeCacheIDs.insert(id) }
+            }
             do {
                 var downloadedIDs: Set<UUID> = []
                 for id in ids { downloadedIDs.formUnion(try await inbox.download(id)) }

@@ -50,13 +50,3 @@ struct AttachmentThumbnail: View {
             }
     }
 }
-#if DIRECT_TEST_RUNNER
-func checkAttachmentPreviewGeometry() {
-    for size in [CGSize(width: 100, height: 1000), CGSize(width: 1000, height: 100), CGSize(width: 400, height: 300)] {
-        let rect = AttachmentPreviewGeometry.fit(size: size, in: CGSize(width: 800, height: 600))
-        assert(rect.width <= 736 && rect.height <= 536)
-        assert(abs(rect.width / rect.height - size.width / size.height) < 0.001)
-        assert(rect.midX == 400 && rect.midY == 300)
-    }
-}
-#endif

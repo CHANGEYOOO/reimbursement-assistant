@@ -125,6 +125,13 @@ struct MailBody: Sendable {
     func reset() { close(); pending.values.forEach { $0.cancel() }; pending.removeAll(); cache.removeAll(); order.removeAll() }
 }
 
+private struct MailDetailOpenKey: EnvironmentKey { static let defaultValue = false }
+private struct CloseMailDetailKey: EnvironmentKey { static let defaultValue: @MainActor @Sendable () -> Void = {} }
+extension EnvironmentValues {
+    var mailDetailIsOpen: Bool { get { self[MailDetailOpenKey.self] } set { self[MailDetailOpenKey.self] = newValue } }
+    var closeMailDetail: @MainActor @Sendable () -> Void { get { self[CloseMailDetailKey.self] } set { self[CloseMailDetailKey.self] = newValue } }
+}
+
 struct InvoiceMailboxContent<Content: View>: View {
     @ObservedObject var mailbox: MailboxSyncController
     @StateObject private var detail = MailDetailState()
@@ -154,7 +161,8 @@ struct InvoiceMailboxContent<Content: View>: View {
                     }.frame(maxHeight: 180)
                     Divider()
                 }
-                content
+                content.environment(\.mailDetailIsOpen, detail.selected != nil)
+                    .environment(\.closeMailDetail, { detail.close() })
             }.frame(minWidth: 650, maxWidth: .infinity, maxHeight: .infinity)
             if let notice = detail.selected {
                 MailDetailView(notice: notice, state: detail).frame(minWidth: 360, idealWidth: 440, maxWidth: 600)

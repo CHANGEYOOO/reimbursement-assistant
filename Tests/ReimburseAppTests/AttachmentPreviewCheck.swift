@@ -3,7 +3,6 @@ import AppKit
 import PDFKit
 
 func checkAttachmentThumbnails() async throws {
-    checkAttachmentPreviewGeometry()
     let folder = FileManager.default.temporaryDirectory.appendingPathComponent("attachment-preview-check-" + UUID().uuidString)
     try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
     let image = NSImage(size: CGSize(width: 300, height: 150))
@@ -18,6 +17,7 @@ func checkAttachmentThumbnails() async throws {
     let pdf = PDFDocument(); pdf.insert(PDFPage(image: image)!, at: 0); pdf.insert(PDFPage(image: image)!, at: 1)
     let pdfURL = folder.appendingPathComponent("sample.pdf")
     assert(pdf.write(to: pdfURL))
+    await checkAttachmentSidebarState(imageURL: imageURL, pdfURL: pdfURL)
     let pdfData = await cache.thumbnail(pdfURL)
     assert(pdfData != nil)
     let missing = await cache.thumbnail(folder.appendingPathComponent("missing.pdf"))
