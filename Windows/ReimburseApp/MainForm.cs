@@ -114,13 +114,13 @@ public sealed class MainForm : Form
         _preview.Click += (_, _) => { if (_expenses.FirstOrDefault(row => row.Id == _selected) is { } row) ShowPreview(row); };
 
         var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 5, Padding = new Padding(12) };
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 48));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 48));
+        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 84));
         _orderSplit.Panel1.Controls.Add(root);
-        var toolbar = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false };
+        var toolbar = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = true, AutoSize = true };
         toolbar.Controls.Add(new Label { Text = "报销单标题", AutoSize = true, Margin = new Padding(0, 8, 8, 0) });
         _title.Width = 240;
         toolbar.Controls.Add(_title);
@@ -132,7 +132,7 @@ public sealed class MainForm : Form
         _undoButton.Click += (_, _) => Undo();
         toolbar.Controls.Add(_undoButton);
         root.Controls.Add(toolbar, 0, 0);
-        var tools = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false };
+        var tools = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = true, AutoSize = true };
         tools.Controls.Add(_search);
         tools.Controls.Add(_onlyProblems);
         var next = new Button { Text = "查看待处理问题", AutoSize = true };
@@ -270,7 +270,7 @@ public sealed class MainForm : Form
 
     private void AddRow(ExpenseRow row)
     {
-        var panel = new TableLayoutPanel { Height = 205, Width = RowWidth(), ColumnCount = 5, RowCount = 1, Padding = new Padding(8, 7, 8, 7), Margin = new Padding(0), BackColor = Color.White, Tag = row.Id };
+        var panel = new TableLayoutPanel { Height = 260, Width = RowWidth(), ColumnCount = 5, RowCount = 1, Padding = new Padding(8, 7, 8, 7), Margin = new Padding(0), BackColor = Color.White, Tag = row.Id };
         SetColumns(panel);
         var numberBox = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false };
         var number = new Label { AutoSize = true, Text = (_expenses.Count).ToString(CultureInfo.InvariantCulture), Margin = new Padding(2, 5, 0, 7) };
@@ -296,21 +296,19 @@ public sealed class MainForm : Form
 
         var nameBox = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 4, ColumnCount = 1 };
         nameBox.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
-        nameBox.RowStyles.Add(new RowStyle(SizeType.Absolute, 70));
-        nameBox.RowStyles.Add(new RowStyle(SizeType.Absolute, 27));
+        nameBox.RowStyles.Add(new RowStyle(SizeType.Absolute, 116));
+        nameBox.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));
         nameBox.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         var purpose = new TextBox { Text = row.Purpose, Dock = DockStyle.Top, PlaceholderText = "填写用途" };
         purpose.TextChanged += (_, _) => { if (_settingValues) return; Remember(); row.Purpose = purpose.Text; MarkEdited(row, "purpose"); UpdateSummary(); };
         nameBox.Controls.Add(purpose, 0, 0);
-        var categoryLine = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = true, AutoScroll = true };
+        var categoryLine = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false, FlowDirection = FlowDirection.TopDown };
         var category = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 98 };
         category.Items.AddRange(Categories);
         category.SelectedItem = Categories.Contains(row.Category) ? row.Category : "待分类";
-        var filename = new Label { Text = string.IsNullOrEmpty(row.OriginalFilename) ? Path.GetFileName(row.ImagePath) : row.OriginalFilename, AutoEllipsis = true, ForeColor = Color.DimGray, Width = 95, Height = 28, TextAlign = ContentAlignment.MiddleLeft, Margin = new Padding(8, 0, 0, 0) };
         var recognizedText = new Button { Text = "识别文字", AutoSize = true, Enabled = false, Font = new Font(Font.FontFamily, 8.5f), Margin = new Padding(3, 0, 0, 0) };
         recognizedText.Click += (_, _) => ShowRecognizedText(row);
         categoryLine.Controls.Add(category);
-        categoryLine.Controls.Add(filename);
         categoryLine.Controls.Add(recognizedText);
         var aiButton = new Button { Text = "AI 辅助", AutoSize = true, Font = new Font(Font.FontFamily, 8.5f) };
         aiButton.Click += async (_, _) => {
@@ -379,12 +377,12 @@ public sealed class MainForm : Form
         panel.MouseMove += (_, e) => StartRowDrag(panel, row, e.Location, e.Button);
         number.MouseDown += (_, e) => { SelectRow(row.Id); _dragStart = e.Location; };
         number.MouseMove += (_, e) => StartRowDrag(number, row, e.Location, e.Button);
-        foreach (var control in new Control[] { numberBox, number, date, nameBox, purpose, categoryLine, category, filename, recognizedText, warning, confirmed, image, amountBox, amount, candidateHint, candidates, delete })
+        foreach (var control in new Control[] { numberBox, number, date, nameBox, purpose, categoryLine, category, recognizedText, warning, confirmed, image, amountBox, amount, candidateHint, candidates, delete })
         {
             control.MouseDown += (_, _) => SelectRow(row.Id);
             EnableDrop(control);
         }
-        foreach (var handle in new Control[] { numberBox, filename, warning, image })
+        foreach (var handle in new Control[] { numberBox, warning, image })
         {
             handle.MouseDown += (_, e) => _dragStart = e.Location;
             handle.MouseMove += (_, e) => StartRowDrag(handle, row, e.Location, e.Button);
@@ -438,7 +436,7 @@ public sealed class MainForm : Form
         ui.Confirmed.Visible = !row.Duplicate && !row.Pending;
         ui.Confirmed.Checked = row.Confirmed;
         ui.RecognizedText.Enabled = !string.IsNullOrWhiteSpace(row.RecognizedText);
-        ui.Panel.Height = row.AmountCandidates.Count > 0 ? 255 : 205;
+        ui.Panel.Height = row.AmountCandidates.Count > 0 ? 280 : 260;
         ui.CandidateHint.Visible = row.AmountCandidates.Count > 0 && !row.Duplicate;
         ui.Candidates.Visible = ui.CandidateHint.Visible;
         {
@@ -576,7 +574,7 @@ public sealed class MainForm : Form
         for (var i = 0; i < _expenses.Count; i++) _controls[_expenses[i].Id].Number.Text = (i + 1).ToString(CultureInfo.InvariantCulture);
     }
 
-    private int RowWidth() => Math.Max(620, _rows.ClientSize.Width - SystemInformation.VerticalScrollBarWidth - 6);
+    private int RowWidth() => Math.Max(520, _rows.ClientSize.Width - SystemInformation.VerticalScrollBarWidth - 6);
     private void ResizeRows() { foreach (var ui in _controls.Values) ui.Panel.Width = RowWidth(); }
 
     private string? Blocker()
@@ -640,10 +638,24 @@ public sealed class MainForm : Form
         var reloaded = new ProjectStore();
         if (reloaded.Projects.Single().Expenses.Single().Amount != 39m) throw new InvalidOperationException("自动保存读取不一致");
         Size = MinimumSize; Application.DoEvents();
+        var categoryActions = _controls[row.Id].Category.Parent!;
+        if (categoryActions.Controls.Cast<Control>().Any(control => control.Right > categoryActions.ClientSize.Width || control.Bottom > categoryActions.ClientSize.Height)) throw new InvalidOperationException("订单分类或 AI 按钮被遮挡");
+        if (_rows.HorizontalScroll.Visible) throw new InvalidOperationException("订单栏目超出可见宽度");
         if (_controls[row.Id].Panel.Height < 200) throw new InvalidOperationException("订单操作区域高度不足");
         var zoom = _orderSplit.Panel2.Controls.Find("previewZoom", true).Single();
         if (zoom.Controls.Cast<Control>().Any(control => control.Right > zoom.ClientSize.Width || control.Bottom > zoom.ClientSize.Height)) throw new InvalidOperationException("截图缩放按钮被遮挡");
         using (var screenshot = new Bitmap(Width, Height)) { DrawToBitmap(screenshot, new Rectangle(Point.Empty, Size)); screenshot.Save("build/windows-orders-smoke.png", ImageFormat.Png); }
+        var settings = AppSettings.Current.Copy();
+        settings.AiModel = "fixture-ds-model"; settings.ApiKey = "fixture-deepseek-secret"; settings.CaptureAiProfile();
+        settings.SelectAiProvider("阿里百炼"); settings.AiModel = "fixture-aliyun-model"; settings.ApiKey = "fixture-aliyun-secret";
+        AppSettings.Replace(settings);
+        var plain = File.ReadAllText(Path.Combine(AppPaths.Root, "settings.json"));
+        if (plain.Contains("fixture-deepseek-secret") || plain.Contains("fixture-aliyun-secret")) throw new InvalidOperationException("设置中出现明文密钥");
+        var loaded = (AppSettings)typeof(AppSettings).GetMethod("Load", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!.Invoke(null, null)!;
+        loaded.SelectAiProvider("DeepSeek");
+        if (loaded.ApiKey != "fixture-deepseek-secret" || loaded.AiModel != "fixture-ds-model") throw new InvalidOperationException("DeepSeek 独立配置读取失败");
+        loaded.SelectAiProvider("阿里百炼");
+        if (loaded.ApiKey != "fixture-aliyun-secret" || loaded.AiModel != "fixture-aliyun-model") throw new InvalidOperationException("阿里独立配置读取失败");
         _exitRequested = true; Close();
     }
 

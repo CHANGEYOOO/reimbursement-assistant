@@ -8,6 +8,7 @@ public sealed class SettingsForm : Form
 {
     private readonly InvoiceRepository? _repository;
     private readonly AppSettings _original;
+    private readonly AppSettings _aiDraft;
     private readonly ComboBox _provider = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 280 };
     private readonly CheckBox _aiEnabled = new() { Text = "启用 AI 辅助识别", AutoSize = true };
     private readonly TextBox _endpoint = new() { Width = 560 };
@@ -32,6 +33,7 @@ public sealed class SettingsForm : Form
     {
         _repository = repository;
         _original = AppSettings.Current.Copy();
+        _aiDraft = _original.Copy();
         Text = "设置";
         Font = new Font("Microsoft YaHei UI", 10);
         Size = new Size(780, 700);
@@ -143,25 +145,31 @@ public sealed class SettingsForm : Form
 
     private AppSettings Draft()
     {
-        var provider = _provider.SelectedItem?.ToString() ?? "DeepSeek";
         var address = _address.Text.Trim().ToLowerInvariant();
-        return new AppSettings
-        {
-            AiEnabled = _aiEnabled.Checked, AiProvider = provider, AiEndpoint = _endpoint.Text.Trim(), AiModel = _model.Text.Trim(),
-            ApiKey = string.IsNullOrWhiteSpace(_apiKey.Text) ? provider == _original.AiProvider ? _original.ApiKey : "" : _apiKey.Text.Trim(),
-            MailEnabled = _mailEnabled.Checked, MailAddress = address,
-            MailPassword = string.IsNullOrWhiteSpace(_mailCode.Text) ? string.Equals(address, _original.MailAddress, StringComparison.OrdinalIgnoreCase) ? _original.MailPassword : "" : _mailCode.Text.Trim(),
-            MailSince = new DateTimeOffset(_since.Value.Date), NotificationsEnabled = _notifications.Checked,
-            StartupEnabled = _startup.Checked, CacheLimitMb = (double)_cacheLimit.Value
-        };
+        var settings = _aiDraft.Copy();
+        settings.AiEnabled = _aiEnabled.Checked;
+        settings.AiProvider = _provider.SelectedItem?.ToString() ?? "DeepSeek";
+        settings.AiEndpoint = _endpoint.Text.Trim();
+        settings.AiModel = _model.Text.Trim();
+        settings.ApiKey = string.IsNullOrWhiteSpace(_apiKey.Text) ? _aiDraft.ApiKey : _apiKey.Text.Trim();
+        settings.CaptureAiProfile();
+        settings.MailEnabled = _mailEnabled.Checked;
+        settings.MailAddress = address;
+        settings.MailPassword = string.IsNullOrWhiteSpace(_mailCode.Text) ? string.Equals(address, _original.MailAddress, StringComparison.OrdinalIgnoreCase) ? _original.MailPassword : "" : _mailCode.Text.Trim();
+        settings.MailSince = new DateTimeOffset(_since.Value.Date);
+        settings.NotificationsEnabled = _notifications.Checked;
+        settings.StartupEnabled = _startup.Checked;
+        settings.CacheLimitMb = (double)_cacheLimit.Value;
+        return settings;
     }
     private void ProviderChanged()
     {
-        var provider = _provider.SelectedItem?.ToString() ?? "DeepSeek";
-        if (provider == _original.AiProvider) { _endpoint.Text = _original.AiEndpoint; _model.Text = _original.AiModel; }
-        else if (provider == "DeepSeek") { _endpoint.Text = "https://api.deepseek.com/chat/completions"; _model.Text = "deepseek-flash"; }
-        else if (provider == "阿里百炼") { _endpoint.Text = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"; _model.Text = "qwen-plus"; }
-        else { _endpoint.Text = ""; _model.Text = ""; }
+        _aiDraft.AiEndpoint = _endpoint.Text.Trim();
+        _aiDraft.AiModel = _model.Text.Trim();
+        if (!string.IsNullOrWhiteSpace(_apiKey.Text)) _aiDraft.ApiKey = _apiKey.Text.Trim();
+        _aiDraft.SelectAiProvider(_provider.SelectedItem?.ToString() ?? "DeepSeek");
+        _endpoint.Text = _aiDraft.AiEndpoint;
+        _model.Text = _aiDraft.AiModel;
         _apiKey.Clear();
     }
     private void SaveImmediate(bool startup)

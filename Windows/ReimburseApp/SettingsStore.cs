@@ -6,6 +6,8 @@ using System.Text.RegularExpressions;
 
 namespace ReimburseApp;
 
+public sealed record AiProfile(string Endpoint, string Model);
+
 public sealed class AppSettings
 {
     private static AppSettings? _current;
@@ -17,6 +19,8 @@ public sealed class AppSettings
     public string AiEndpoint { get; set; } = "https://api.deepseek.com/chat/completions";
     public string AiModel { get; set; } = "deepseek-flash";
     [JsonIgnore] public string ApiKey { get; set; } = "";
+    public Dictionary<string, AiProfile> AiProfiles { get; set; } = [];
+    [JsonIgnore] public Dictionary<string, string> ApiKeys { get; set; } = [];
     public bool MailEnabled { get; set; }
     public string MailAddress { get; set; } = "";
     [JsonIgnore] public string MailPassword { get; set; } = "";
@@ -28,23 +32,50 @@ public sealed class AppSettings
     public AppSettings Copy() => new()
     {
         AiEnabled = AiEnabled, AiProvider = AiProvider, AiEndpoint = AiEndpoint, AiModel = AiModel, ApiKey = ApiKey,
+        AiProfiles = AiProfiles.ToDictionary(pair => pair.Key, pair => pair.Value with { }),
+        ApiKeys = new Dictionary<string, string>(ApiKeys),
         MailEnabled = MailEnabled, MailAddress = MailAddress, MailPassword = MailPassword, MailSince = MailSince,
         NotificationsEnabled = NotificationsEnabled, StartupEnabled = StartupEnabled, CacheLimitMb = CacheLimitMb
+    };
+
+    public void CaptureAiProfile()
+    {
+        AiProfiles[AiProvider] = new AiProfile(AiEndpoint, AiModel);
+        ApiKeys[AiProvider] = ApiKey;
+    }
+
+    public void SelectAiProvider(string provider)
+    {
+        CaptureAiProfile();
+        AiProvider = provider;
+        var profile = AiProfiles.GetValueOrDefault(provider) ?? DefaultAiProfile(provider);
+        AiEndpoint = profile.Endpoint;
+        AiModel = profile.Model;
+        ApiKey = ApiKeys.GetValueOrDefault(provider) ?? "";
+    }
+
+    public static AiProfile DefaultAiProfile(string provider) => provider switch
+    {
+        "DeepSeek" => new("https://api.deepseek.com/chat/completions", "deepseek-flash"),
+        "阿里百炼" => new("https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions", "qwen-plus"),
+        _ => new("", "")
     };
 
     public static void Save() => Replace(Current);
 
     public static void Replace(AppSettings settings)
     {
-        Validate(settings);
-        var secrets = JsonSerializer.SerializeToUtf8Bytes(new SecretValues(settings.ApiKey, settings.MailAddress, settings.MailPassword));
+        var saved = settings.Copy();
+        saved.CaptureAiProfile();
+        Validate(saved);
+        var secrets = JsonSerializer.SerializeToUtf8Bytes(new SecretValues(saved.ApiKey, saved.MailAddress, saved.MailPassword, saved.ApiKeys));
         string protectedSecrets;
         try { protectedSecrets = Convert.ToBase64String(ProtectedData.Protect(secrets, null, DataProtectionScope.CurrentUser)); }
         catch (Exception ex) when (ex is CryptographicException or PlatformNotSupportedException)
         { throw new InvalidOperationException("无法使用 Windows 系统加密保存密钥，设置未保存。", ex); }
         finally { CryptographicOperations.ZeroMemory(secrets); }
-        WriteJson(Path.Combine(AppPaths.Root, "settings.json"), new SettingsDocument { Settings = settings, ProtectedSecrets = protectedSecrets });
-        _current = settings.Copy();
+        WriteJson(Path.Combine(AppPaths.Root, "settings.json"), new SettingsDocument { Settings = saved, ProtectedSecrets = protectedSecrets });
+        _current = saved;
         Revision++;
     }
 
@@ -86,17 +117,20 @@ public sealed class AppSettings
                 ?? throw new InvalidDataException();
             if (document.Version != 1 || document.Settings == null) throw new InvalidDataException();
             var settings = document.Settings;
+            settings.AiProfiles ??= [];
             if (!string.IsNullOrEmpty(document.ProtectedSecrets))
             {
                 var plain = ProtectedData.Unprotect(Convert.FromBase64String(document.ProtectedSecrets), null, DataProtectionScope.CurrentUser);
                 try
                 {
                     var secrets = JsonSerializer.Deserialize<SecretValues>(plain) ?? throw new InvalidDataException();
-                    settings.ApiKey = secrets.ApiKey;
+                    settings.ApiKeys = secrets.ApiKeys ?? [];
+                    settings.ApiKey = settings.ApiKeys.GetValueOrDefault(settings.AiProvider) ?? secrets.ApiKey;
                     if (string.Equals(secrets.MailAddress, settings.MailAddress, StringComparison.OrdinalIgnoreCase)) settings.MailPassword = secrets.MailPassword;
                 }
                 finally { CryptographicOperations.ZeroMemory(plain); }
             }
+            settings.CaptureAiProfile();
             Validate(settings);
             return settings;
         }
@@ -110,5 +144,5 @@ public sealed class AppSettings
         public AppSettings? Settings { get; set; }
         public string ProtectedSecrets { get; set; } = "";
     }
-    private sealed record SecretValues(string ApiKey, string MailAddress, string MailPassword);
+    private sealed record SecretValues(string ApiKey, string MailAddress, string MailPassword, Dictionary<string, string>? ApiKeys = null);
 }
