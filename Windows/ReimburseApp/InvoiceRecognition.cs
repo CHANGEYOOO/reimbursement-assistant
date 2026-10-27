@@ -82,7 +82,7 @@ public static class InvoiceRecognition
             for (var i = 1; i <= document.NumberOfPages; i++)
             {
                 var page = document.GetPage(i);
-                var glyphs = page.Letters.Where(l => !string.IsNullOrWhiteSpace(l.Value)).Select(l => new Glyph(l.Value.Normalize(NormalizationForm.FormKC), l.GlyphRectangle.Left, l.GlyphRectangle.Bottom, l.GlyphRectangle.Width, l.GlyphRectangle.Height)).ToList();
+                var glyphs = page.Letters.Where(l => !string.IsNullOrWhiteSpace(l.Value)).Select(l => new Glyph(l.Value.Normalize(NormalizationForm.FormKC), l.BoundingBox.Left, l.BoundingBox.Bottom, l.BoundingBox.Width, l.BoundingBox.Height)).ToList();
                 var native = new PageReading(Lines(glyphs) + "\n" + page.Text, glyphs);
                 if (!Classify(native.Text).accepted && !HasSupportingTitle(native.Text))
                 {

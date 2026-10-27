@@ -20,6 +20,11 @@ internal static class Program
 
     [STAThread] private static void Main(string[] args)
     {
+        if (args.Length >= 1 && args[0] == "--self-check")
+        {
+            RunSelfCheck(args.Length == 2 ? args[1] : null);
+            return;
+        }
         ApplicationConfiguration.Initialize();
         try
         {
@@ -55,6 +60,40 @@ internal static class Program
         catch (Exception ex)
         {
             MessageBox.Show(ex.Message + "\n\n操作已停止，已有报销数据不会被清理。", "操作未完成", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
+    private static void RunSelfCheck(string? reportPath)
+    {
+        var root = Path.Combine(Path.GetTempPath(), "ReimbursementInstallerCheck-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        var report = reportPath == null ? Path.Combine(root, "result.json") : Path.GetFullPath(reportPath);
+        try
+        {
+            var target = NormalizeTarget(Path.Combine(root, AppName));
+            foreach (var forbidden in new[] { DataDirectory, Path.GetTempPath(), Path.Combine(root, "OtherApp") })
+            {
+                try { NormalizeTarget(forbidden); }
+                catch (InvalidOperationException) { continue; }
+                throw new InvalidDataException("Installer accepted an unsafe target directory.");
+            }
+            var stage = ExtractVerifiedPayloadAsync(target, (_, _) => { }, preserveOnFailure: true).GetAwaiter().GetResult();
+            using (var executable = File.OpenRead(Path.Combine(stage, AppExe)))
+                if (executable.ReadByte() != 'M' || executable.ReadByte() != 'Z') throw new InvalidDataException("Payload app is not a Windows executable.");
+            var files = Directory.EnumerateFiles(stage, "*", SearchOption.AllDirectories).ToList();
+            var result = new { passed = true, payloadFiles = files.Count, bytes = files.Sum(file => new FileInfo(file).Length),
+                runtimeBundled = File.Exists(Path.Combine(stage, ".installer", "vc_redist.x64.exe")), fixtureDirectory = root,
+                checks = "Embedded ZIP path/size/duplicate/link validation, every file SHA256, Windows executable header, protected-data target rejection. No registry, UAC, installation, uninstall or user settings accessed." };
+            Directory.CreateDirectory(Path.GetDirectoryName(report)!);
+            File.WriteAllText(report, JsonSerializer.Serialize(result));
+            Console.WriteLine(JsonSerializer.Serialize(result));
+        }
+        catch (Exception ex)
+        {
+            Environment.ExitCode = 1;
+            var result = JsonSerializer.Serialize(new { passed = false, error = ex.Message, fixtureDirectory = root });
+            try { Directory.CreateDirectory(Path.GetDirectoryName(report)!); File.WriteAllText(report, result); } catch { }
+            Console.Error.WriteLine(result);
         }
     }
 
@@ -104,7 +143,7 @@ internal static class Program
         return major > 14 || major == 14 && minor >= 29;
     }
 
-    internal static async Task<string> ExtractVerifiedPayloadAsync(string target, Action<int, string> progress)
+    internal static async Task<string> ExtractVerifiedPayloadAsync(string target, Action<int, string> progress, bool preserveOnFailure = false)
     {
         var parent = Path.GetDirectoryName(target)!;
         Directory.CreateDirectory(parent);
@@ -145,7 +184,7 @@ internal static class Program
             }
             return stage;
         }
-        catch { RecycleDirectory(stage); throw; }
+        catch { if (!preserveOnFailure) RecycleDirectory(stage); throw; }
     }
 
     internal static async Task InstallRuntimeAsync(string stage, bool consent)

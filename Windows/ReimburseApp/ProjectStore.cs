@@ -37,6 +37,8 @@ public sealed class ProjectStore
         }
         Projects.Sort((a, b) => b.UpdatedAt.CompareTo(a.UpdatedAt));
     }
+    public Guid? LastSelectedId => File.Exists(Path.Combine(AppPaths.Root, "last-project.txt")) && Guid.TryParse(File.ReadAllText(Path.Combine(AppPaths.Root, "last-project.txt")), out var id) ? id : null;
+    public void Select(ProjectRecord project) => AtomicWrite(Path.Combine(AppPaths.Root, "last-project.txt"), project.Id.ToString());
     public ProjectRecord Create()
     {
         var project = new ProjectRecord { Title = "报销单 " + DateTime.Today.ToString("yyyy-MM-dd") };

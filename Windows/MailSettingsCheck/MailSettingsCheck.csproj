@@ -10,7 +10,7 @@
     <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.14" />
     <PackageReference Include="PdfPig" Version="0.1.16" />
     <PackageReference Include="PDFtoImage" Version="5.4.0" />
-    <PackageReference Include="Magick.NET-Q8-x64" Version="14.11.0" />
+    <PackageReference Include="Magick.NET-Q8-x64" Version="15.0.0" />
     <PackageReference Include="Tesseract" Version="5.2.0" />
     <Compile Include="../ReimburseApp/SettingsStore.cs" Link="SettingsStore.cs" />
     <Compile Include="../ReimburseApp/MailService.cs" Link="MailService.cs" />

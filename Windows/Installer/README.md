@@ -27,3 +27,14 @@ dotnet publish Windows/Installer/Installer.csproj -c Release -r win-x64 --self-c
 卸载程序从独立临时副本运行，核对产品标记与卸载记录后将程序目录和归属本应用的快捷方式移入回收站。卸载完成后，正在运行的临时卸载副本保留在 Windows 临时目录，交由系统存储管理清理，不影响软件卸载。
 
 构建和文件完整性检查不替代真实 Windows 安装、升级、运行库 UAC、卸载及高 DPI 操作验收。
+
+
+可在 Windows 构建机器上执行安装包的隔离自检：
+
+```powershell
+$process = Start-Process -FilePath ".\build\windows-installer\报销单助手-安装程序-1.27.exe" -ArgumentList @('--self-check', 'C:\Temp\installer-check.json') -Wait -PassThru
+if ($process.ExitCode -ne 0) { throw "Installer payload self-check failed" }
+Get-Content C:\Temp\installer-check.json
+```
+
+此模式只将嵌入载荷释放到随机 Windows 临时目录并逐文件检查路径、大小和 SHA-256，再检查主程序头及受保护目录拒绝规则；不读写注册表、不安装运行库、不执行安装或卸载、不访问用户项目和密钥。测试文件保留。

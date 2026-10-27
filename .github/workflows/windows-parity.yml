@@ -43,10 +43,22 @@ jobs:
           $process = Start-Process -FilePath 'build/windows-app/报销单助手.exe' -ArgumentList '--self-check' -Wait -PassThru
           Get-Content 'build/windows-smoke.log'
           if ($process.ExitCode -ne 0) { throw 'Windows startup check failed' }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Windows-startup-diagnostics
+          path: build/windows-smoke.*
+          retention-days: 7
       - name: Package installer payload
         run: python scripts/package-windows-installer.py --payload-dir build/windows-app --runtime build/vc_redist.x64.exe --output build/windows-payload.zip
       - name: Publish installer
         run: dotnet publish Windows/Installer -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o build/windows-installer
+      - name: Installer payload integrity smoke check
+        shell: pwsh
+        run: |
+          $process = Start-Process -FilePath 'build/windows-installer/报销单助手-安装程序-1.27.exe' -ArgumentList @('--self-check','build/windows-installer-check.json') -Wait -PassThru
+          Get-Content 'build/windows-installer-check.json'
+          if ($process.ExitCode -ne 0) { throw 'Installer payload check failed' }
       - name: Name delivery and checksum
         shell: pwsh
         run: |

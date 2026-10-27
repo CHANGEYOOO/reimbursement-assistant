@@ -25,6 +25,8 @@ public sealed class MainForm : Form
     private readonly TextBox _search = new() { Width = 145, PlaceholderText = "搜索已填写金额" };
     private readonly CheckBox _onlyProblems = new() { Text = "只看待处理", AutoSize = true };
     private readonly Button _undoButton = new() { Text = "撤销", AutoSize = true, Enabled = false };
+    private readonly Label _mailStatus = new() { Dock = DockStyle.Fill, AutoEllipsis = true, TextAlign = ContentAlignment.MiddleLeft };
+    private readonly Button _mailNotices = new() { Text = "需处理邮件", Dock = DockStyle.Fill };
     private readonly Label _saveStatus = new() { AutoSize = true, Text = "已保存" };
     private readonly System.Windows.Forms.Timer _saveTimer = new() { Interval = 500 };
     private readonly Stack<string> _undo = new();
@@ -64,7 +66,7 @@ public sealed class MainForm : Form
         _invoiceWorkspace.SyncRequested += async (_, _) => await _background.SyncAsync();
         _invoices.AutomaticCleanupFailed += (_, message) => { RestoreWindow(); MessageBox.Show(this, message + "\n请在缓存设置中检查并重试。", "缓存自动清理已停止", MessageBoxButtons.OK, MessageBoxIcon.Warning); };
         _background.ExitRequested += (_, _) => { _exitRequested = true; Close(); };
-        _background.StatusChanged += (_, _) => _saveStatus.Text = _dirty ? "等待保存…" : "已保存 · " + _background.Status;
+        _background.StatusChanged += (_, _) => { _mailStatus.Text = _background.Status; _mailNotices.Text = $"需处理邮件（{_background.ManualMessages.Count}）"; _mailNotices.Enabled = _background.ManualMessages.Count > 0; };
 
         var shell = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1 };
         shell.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 175));
@@ -84,7 +86,15 @@ public sealed class MainForm : Form
         sidebar.Controls.Add(sideButton("项目发票夹", ShowProjectInvoices), 0, 6);
         sidebar.Controls.Add(sideButton("设置", OpenSettings), 0, 7);
         shell.Controls.Add(sidebar, 0, 0);
-        shell.Controls.Add(_host, 1, 0);
+        var workspace = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2 };
+        workspace.RowStyles.Add(new RowStyle(SizeType.Absolute, 36)); workspace.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        var mailBar = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, Padding = new Padding(10, 0, 8, 0) };
+        mailBar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); mailBar.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 105)); mailBar.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 165));
+        _mailStatus.Text = _background.Status;
+        var sync = new Button { Text = "同步邮箱", Dock = DockStyle.Fill }; sync.Click += async (_, _) => await _background.SyncAsync();
+        _mailNotices.Click += (_, _) => ShowMailNotices(); _mailNotices.Enabled = false;
+        mailBar.Controls.Add(_mailStatus, 0, 0); mailBar.Controls.Add(sync, 1, 0); mailBar.Controls.Add(_mailNotices, 2, 0);
+        workspace.Controls.Add(mailBar, 0, 0); workspace.Controls.Add(_host, 0, 1); shell.Controls.Add(workspace, 1, 0);
         _host.Controls.Add(_orderSplit);
         _host.Controls.Add(_invoiceWorkspace);
         var previewBox = new Panel { Dock = DockStyle.Fill, Padding = new Padding(8), BackColor = Color.FromArgb(246, 248, 250) };
@@ -150,7 +160,7 @@ public sealed class MainForm : Form
         EnableDropTree(root);
         if (_store.Projects.Count == 0) _store.Create();
         RefreshProjects();
-        LoadProject(_store.Projects[0]);
+        LoadProject(_store.Projects.FirstOrDefault(project => project.Id == _store.LastSelectedId) ?? _store.Projects[0]);
         Shown += async (_, _) =>
         {
             _orderSplit.SplitterDistance = Math.Max(650, _orderSplit.Width - 285);
@@ -607,7 +617,8 @@ public sealed class MainForm : Form
     {
         _selfCheck = true;
         Show(); Application.DoEvents();
-        if (_orderSplit.Width < 900 || !_title.Visible || !_export.Visible) throw new InvalidOperationException("主窗口未正确显示");
+        using (var screenshot = new Bitmap(Width, Height)) { DrawToBitmap(screenshot, new Rectangle(Point.Empty, Size)); screenshot.Save("build/windows-smoke.png", ImageFormat.Png); }
+        if (_orderSplit.Width < 650 || !_title.Visible || !_export.Visible) throw new InvalidOperationException($"主窗口未正确显示（window={Size}, workspace={_orderSplit.Size}, title={_title.Visible}, export={_export.Visible}）");
         var imagePath = Path.Combine(AppPaths.Root, "sample.png");
         using (var image = new Bitmap(700, 220))
         {
@@ -711,6 +722,7 @@ public sealed class MainForm : Form
         Renumber(); UpdateSummary();
         _loadingProject = false;
         RefreshProjects(); ShowOrders();
+        try { _store.Select(project); } catch (Exception ex) { _saveStatus.Text = "无法记录当前项目：" + ex.Message; }
         if (_expenses.Count > 0) SelectRow(_expenses[0].Id);
         foreach (var row in _expenses.Where(row => row.Pending && !_recognizing.Contains(row.Id)).ToArray()) _ = RecognizeAsync(row);
     }
@@ -758,6 +770,21 @@ public sealed class MainForm : Form
                 foreach (var row in _store.Projects.SelectMany(project => project.Expenses).Where(row => !row.Pending && SemanticClassifier.NeedsAssistance(row)).ToArray()) await AssistRowAsync(row);
         }
     }
+    private void ShowMailNotices()
+    {
+        using var form = new Form { Text = "需在 QQ 邮箱处理的邮件", Size = new Size(720, 420), StartPosition = FormStartPosition.CenterParent };
+        var list = new ListBox { Dock = DockStyle.Fill, IntegralHeight = false };
+        var notices = _background.ManualMessages.ToList();
+        foreach (var notice in notices) list.Items.Add($"{notice.ReceivedAt:yyyy-MM-dd} · {notice.Sender} · {notice.Subject}");
+        var tools = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 44 };
+        var open = new Button { Text = "打开 QQ 邮箱", AutoSize = true };
+        open.Click += (_, _) => System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("https://mail.qq.com") { UseShellExecute = true });
+        var dismiss = new Button { Text = "忽略选中提醒", AutoSize = true };
+        dismiss.Click += (_, _) => { if (list.SelectedIndex < 0) return; var index = list.SelectedIndex; _background.DismissNotice(notices[index].Id); notices.RemoveAt(index); list.Items.RemoveAt(index); };
+        tools.Controls.Add(open); tools.Controls.Add(dismiss);
+        form.Controls.Add(list); form.Controls.Add(tools); form.ShowDialog(this);
+    }
+
     private void ApplyFilters()
     {
         var query = _search.Text.Trim();

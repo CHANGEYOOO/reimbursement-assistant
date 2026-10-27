@@ -1,6 +1,7 @@
 using MailKit;
 using MimeKit;
 using ReimburseApp;
+using MailService = ReimburseApp.MailService;
 
 MailSettingsChecks.Run();
 
