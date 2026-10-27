@@ -18,11 +18,16 @@ public struct InboxInvoice: Identifiable, Codable, Sendable {
     public var projectID: UUID?
     public var projectInvoiceID: UUID?
     public var remote: MailAttachmentReference? = nil
+    public var lastAccessedAt: Date? = nil
+    public var documentKind: InvoiceDocumentKind? = nil
+    public var documentReason: String? = nil
+    public var documentConfirmed: Bool? = nil
 }
 
 private struct InboxSnapshot: Codable {
     var items: [InboxInvoice]
     var expandedArchives: [String: Set<UUID>]
+    var dismissedRemotes: Set<String>? = nil
 }
 
 @MainActor public final class InvoiceInboxStore: ObservableObject {
@@ -32,6 +37,10 @@ private struct InboxSnapshot: Codable {
     private let directory: URL
     private let projectsDirectory: URL
     private var editedIDs: Set<UUID> = []
+    private var dismissedRemotes: Set<String> = []
+    public var activeCacheIDs: Set<UUID> = []
+    public var onCacheChanged: ((Set<UUID>) -> Void)?
+    public var cacheDirectoryURL: URL { filesDirectory }
     private var expandedArchives: [String: Set<UUID>] = [:]
     private var canWrite = true
     private var filesDirectory: URL { directory.appendingPathComponent("files", isDirectory: true) }
@@ -47,6 +56,7 @@ private struct InboxSnapshot: Codable {
                 let saved = try JSONDecoder().decode(InboxSnapshot.self, from: Data(contentsOf: metadata))
                 items = saved.items
                 expandedArchives = saved.expandedArchives
+                dismissedRemotes = saved.dismissedRemotes ?? []
             }
             try refreshAssignments()
         } catch {
@@ -81,7 +91,8 @@ private struct InboxSnapshot: Codable {
         var updated = items
         for attachment in message.attachments {
             let key = remoteKey(attachment.remote)
-            guard expandedArchives[key] == nil,
+            guard !dismissedRemotes.contains(key), expandedArchives[key] == nil,
+                  InvoiceDocumentClassifier.shouldList(filename: attachment.filename, subject: message.subject),
                   !updated.contains(where: { $0.remote.map(remoteKey) == key }) else { continue }
             let name = URL(fileURLWithPath: attachment.filename).lastPathComponent
             let ext = URL(fileURLWithPath: name).pathExtension.lowercased()
@@ -102,15 +113,17 @@ private struct InboxSnapshot: Codable {
         guard let item = items.first(where: { $0.id == id }) else { throw failure("发票不存在，请刷新后重试。") }
         if isDownloaded(item), !item.fingerprint.hasPrefix("remote:"), item.warning == nil,
            (item.amount ?? .zero) > 0 {
-            if item.buyerTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            if item.buyerTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || item.documentKind == nil {
                 do { try await rerecognize(id) }
                 catch { lastError = "发票已下载，抬头补充识别失败：\(error.localizedDescription)" }
             }
+            try recordAccess(id)
+            onCacheChanged?([id])
             return [id]
         }
         guard !pendingIDs.contains(id) else { throw failure("该发票正在下载或识别，请稍后再试。") }
         pendingIDs.insert(id)
-        defer { pendingIDs.remove(id) }
+        defer { pendingIDs.remove(id); onCacheChanged?([id]) }
         let cached = isDownloaded(item)
         let data: Data
         if cached {
@@ -154,7 +167,16 @@ private struct InboxSnapshot: Codable {
             try persist(updated)
             items = updated
         }
+        try recordAccess(id)
         return [id]
+    }
+
+    private func recordAccess(_ id: UUID) throws {
+        guard let index = items.firstIndex(where: { $0.id == id }) else { return }
+        var updated = items
+        updated[index].lastAccessedAt = Date()
+        try persist(updated)
+        items = updated
     }
 
     public func rerecognize(_ id: UUID) async throws {
@@ -169,12 +191,25 @@ private struct InboxSnapshot: Codable {
 
     public func refreshMissingTitles() async {
         guard canWrite else { return }
-        let ids = items.filter { isDownloaded($0) && $0.buyerTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-            .map(\.id)
-        for id in ids where !pendingIDs.contains(id) {
+        var updated = items
+        for index in updated.indices where !isDownloaded(updated[index]) && updated[index].documentKind != .invoice && updated[index].documentConfirmed != true {
+            if !InvoiceDocumentClassifier.shouldList(filename: updated[index].originalFilename, subject: updated[index].source) {
+                updated[index].documentKind = .nonInvoice
+                updated[index].documentReason = "附件名称表明是行程、报销汇总或明细文件。"
+            }
+        }
+        do { try persist(updated); items = updated }
+        catch { lastError = error.localizedDescription; return }
+        let ids = items.filter { isDownloaded($0) && ($0.documentKind == nil || ($0.amount ?? .zero) <= 0 || $0.buyerTitle.isEmpty) }.map(\.id)
+        for id in ids {
             guard !Task.isCancelled else { return }
-            do { try await rerecognize(id) }
-            catch { lastError = "补充识别发票抬头失败：\(error.localizedDescription)" }
+            guard let item = items.first(where: { $0.id == id }), isDownloaded(item), !pendingIDs.contains(id) else { continue }
+            pendingIDs.insert(id)
+            do {
+                try await recognize(id, at: sourceURL(for: item), namedAmount: item.amount.flatMap { $0 > 0 ? $0 : nil },
+                    metadataOnly: (item.amount ?? .zero) > 0)
+            } catch { lastError = "补充识别发票失败：\(error.localizedDescription)" }
+            pendingIDs.remove(id)
         }
     }
 
@@ -205,17 +240,20 @@ private struct InboxSnapshot: Codable {
         try persist(updated)
         items = updated
         pendingIDs.insert(id)
-        defer { pendingIDs.remove(id) }
+        defer { pendingIDs.remove(id); onCacheChanged?([]) }
         try await recognize(id, at: destination, namedAmount: amount)
     }
 
     private func recognize(_ id: UUID, at destination: URL, namedAmount: Decimal?, metadataOnly: Bool = false) async throws {
-        let result: (text: String, buyer: String, seller: String, item: String)
+        let filename = items.first(where: { $0.id == id })?.originalFilename ?? destination.lastPathComponent
+        let result: (text: String, buyer: String, seller: String, item: String, amount: Decimal?, kind: InvoiceDocumentKind, reason: String)
         do {
             result = try await Task.detached(priority: .userInitiated) {
                 let text = try InvoiceStore.invoiceText(at: destination)
                 let details = try InvoicePartyRecognition.details(at: destination, text: text)
-                return (text, details.buyer, details.seller, details.item)
+                let classification = InvoiceDocumentClassifier.classify(at: destination, text: text, filename: filename)
+                let amount = metadataOnly ? nil : try InvoiceAmountRecognition.total(at: destination, text: text)
+                return (text, details.buyer, details.seller, details.item, amount, classification.kind, classification.reason)
             }.value
         } catch {
             if !metadataOnly, let index = items.firstIndex(where: { $0.id == id }) {
@@ -229,7 +267,7 @@ private struct InboxSnapshot: Codable {
         guard let index = items.firstIndex(where: { $0.id == id }) else { return }
         var updated = items
         if !metadataOnly, !editedIDs.contains(id) {
-            updated[index].amount = namedAmount ?? InvoiceStore.totalAmount(in: result.text)
+            updated[index].amount = namedAmount ?? result.amount
         }
         // Money edits do not suppress title completion; an existing title is never overwritten.
         if updated[index].buyerTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -237,7 +275,11 @@ private struct InboxSnapshot: Codable {
         }
         if !metadataOnly || updated[index].sellerTitle.isEmpty { updated[index].sellerTitle = result.seller }
         if !metadataOnly || updated[index].itemDescription.isEmpty { updated[index].itemDescription = result.item }
-        if !metadataOnly { updated[index].warning = (updated[index].amount ?? .zero) > 0 ? nil : "未识别到金额，请手动填写。" }
+        if !metadataOnly { updated[index].warning = (updated[index].amount ?? .zero) > 0 ? nil : "未识别到价税合计，请手动填写。" }
+        if updated[index].documentConfirmed != true {
+            updated[index].documentKind = result.kind
+            updated[index].documentReason = result.reason
+        }
         try persist(updated)
         items = updated
     }
@@ -268,6 +310,9 @@ private struct InboxSnapshot: Codable {
         }
         let selected = items.filter { ids.contains($0.id) }
         guard selected.count == ids.count else { throw failure("部分发票不存在，请刷新后重试。") }
+        guard selected.allSatisfy({ $0.documentKind == .invoice }) else {
+            throw failure("所选附件包含非发票或尚未确认的文件，请先检查类型。")
+        }
         guard selected.allSatisfy({ isDownloaded($0) && !$0.fingerprint.hasPrefix("remote:") }) else {
             throw failure("请先下载所选发票并完成识别，下载中断的发票可点击预览重试。")
         }
@@ -344,9 +389,44 @@ private struct InboxSnapshot: Codable {
         items = updated
     }
 
-    private func persist(_ updated: [InboxInvoice], archives: [String: Set<UUID>]? = nil) throws {
+    public func confirmInvoice(_ id: UUID) throws {
+        guard let index = items.firstIndex(where: { $0.id == id }), isDownloaded(items[index]) else { throw failure("请先下载并查看附件。") }
+        var updated = items
+        updated[index].documentKind = .invoice
+        updated[index].documentReason = "已由你确认为发票。"
+        updated[index].documentConfirmed = true
+        try persist(updated)
+        items = updated
+    }
+
+    public func delete(ids: Set<UUID>) throws { try delete(ids: ids, trash: InvoiceCacheManager.trashFile) }
+
+    func delete(ids: Set<UUID>, trash: (URL) throws -> Void) throws {
+        guard canWrite else { throw failure("发票箱资料无法读取，已停止删除，请先处理读取错误。") }
+        guard !ids.isEmpty else { return }
+        guard try filesDirectory.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink != true else { throw failure("缓存目录是符号链接，已停止删除。") }
+        guard pendingIDs.isDisjoint(with: ids), activeCacheIDs.isDisjoint(with: ids) else { throw failure("部分发票正在处理，请稍后删除。") }
+        var dismissed = dismissedRemotes
+        for item in items where ids.contains(item.id) {
+            let url = sourceURL(for: item)
+            guard URL(fileURLWithPath: item.storedFilename).lastPathComponent == item.storedFilename,
+                  url.deletingLastPathComponent().standardizedFileURL == filesDirectory.standardizedFileURL else { throw failure("发票文件路径异常，已停止删除。") }
+            if FileManager.default.fileExists(atPath: url.path) {
+                guard try url.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink != true else { throw failure("发票文件是符号链接，已停止删除。") }
+                try trash(url)
+            }
+            if let remote = item.remote { dismissed.insert(remoteKey(remote)) }
+        }
+        let updated = items.filter { !ids.contains($0.id) }
+        try persist(updated, dismissed: dismissed)
+        dismissedRemotes = dismissed
+        items = updated
+        onCacheChanged?([])
+    }
+
+    private func persist(_ updated: [InboxInvoice], archives: [String: Set<UUID>]? = nil, dismissed: Set<String>? = nil) throws {
         guard canWrite else { throw failure("发票箱资料无法读取，已停止保存，请先处理读取错误。") }
-        try JSONEncoder().encode(InboxSnapshot(items: updated, expandedArchives: archives ?? expandedArchives))
+        try JSONEncoder().encode(InboxSnapshot(items: updated, expandedArchives: archives ?? expandedArchives, dismissedRemotes: dismissed ?? dismissedRemotes))
             .write(to: directory.appendingPathComponent("inbox.json"), options: .atomic)
     }
 

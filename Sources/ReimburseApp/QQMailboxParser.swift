@@ -49,13 +49,13 @@ enum QQMailboxParser {
         let sender = decodeWords(headers["from"] ?? "")
         var parts: [Part] = []
         collect(structure, prefix: "", into: &parts)
-        let isInvoice = subject.contains("发票")
+        let isInvoice = subject.contains("发票") || subject.lowercased().contains("invoice")
         let supported = Set(["pdf", "png", "jpg", "jpeg", "heic", "heif", "zip"])
         let attachments = parts.compactMap { part -> InvoiceMailAttachment? in
             let filename = (part.filename as NSString).lastPathComponent
             let ext = (filename as NSString).pathExtension.lowercased()
             guard supported.contains(ext), !filename.isEmpty,
-                  isInvoice || filename.contains("发票") || filename.lowercased().hasPrefix("dzfp") else { return nil }
+                  InvoiceDocumentClassifier.shouldList(filename: filename, subject: subject) else { return nil }
             if ["png", "jpg", "jpeg", "heic", "heif"].contains(ext) {
                 guard part.disposition == "ATTACHMENT" || filename.contains("发票") else { return nil }
                 if ["logo", "signature", "icon"].contains(where: filename.lowercased().contains) { return nil }
@@ -64,8 +64,9 @@ enum QQMailboxParser {
                 partID: part.id, encoding: part.encoding, size: part.size)
             return InvoiceMailAttachment(filename: filename, remote: remote)
         }
+        let hasSupportedAttachment = parts.contains { supported.contains(($0.filename as NSString).pathExtension.lowercased()) }
         return InvoiceMailMessage(id: "\(account)|\(uidValidity)|\(uid)", receivedAt: received, subject: subject,
-            sender: sender, attachments: attachments, hasDownloadLink: isInvoice && attachments.isEmpty)
+            sender: sender, attachments: attachments, hasDownloadLink: isInvoice && !hasSupportedAttachment)
     }
 
     private enum Node {

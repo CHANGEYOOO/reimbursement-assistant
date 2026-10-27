@@ -14,8 +14,10 @@ struct AppSettingsView: View {
                     .tabItem { Label("QQ 邮箱", systemImage: "envelope") }
                 BackgroundSettingsView()
                     .tabItem { Label("后台与通知", systemImage: "bell") }
+                CacheSettingsView(cache: AppRuntime.shared.cache)
+                    .tabItem { Label("缓存管理", systemImage: "internaldrive") }
             }
-            Text("AI 和邮箱修改后请点击保存；后台与通知开关即时生效。")
+            Text("AI、邮箱和缓存上限修改后请保存；后台与通知开关即时生效。")
                 .font(.caption).foregroundStyle(.secondary).padding(.bottom, 8)
         }
         .padding(8)

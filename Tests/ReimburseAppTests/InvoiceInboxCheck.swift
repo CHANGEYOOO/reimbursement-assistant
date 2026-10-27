@@ -24,6 +24,8 @@ import Foundation
         let legacy = Invoice(id: UUID(), storedFilename: "old.pdf", originalFilename: "old.pdf", fingerprint: "old", amount: 10, warning: nil)
         try JSONEncoder().encode([legacy]).write(to: projectURL.appendingPathComponent("invoices.json"))
         let project = DraftSummary(id: projectID, title: "测试项目", updatedAt: Date(), url: projectURL)
+        do { try store.assign(ids: [id], to: project); preconditionFailure("Unknown attachment type must require confirmation") } catch {}
+        try store.confirmInvoice(id)
         try store.assign(ids: [id], to: project)
         try store.assign(ids: [id], to: project)
         var assigned = try JSONDecoder().decode([Invoice].self, from: Data(contentsOf: projectURL.appendingPathComponent("invoices.json")))

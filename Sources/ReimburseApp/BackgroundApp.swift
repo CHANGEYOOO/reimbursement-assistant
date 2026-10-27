@@ -6,7 +6,8 @@ import SwiftUI
 
 @MainActor final class AppRuntime: ObservableObject {
     static let shared = AppRuntime()
-    let inbox = InvoiceInboxStore()
+    let inbox: InvoiceInboxStore
+    let cache: InvoiceCacheManager
     let mailbox = MailboxSyncController()
     let notifications = InvoiceNotificationController()
     let startup = LoginItemController()
@@ -17,12 +18,29 @@ import SwiftUI
     private var mainWindow: NSWindow?
     private var launchHidden = false
 
+    private init() {
+        let store = InvoiceInboxStore()
+        inbox = store
+        cache = InvoiceCacheManager(inbox: store)
+    }
+
     func start() {
         guard pollingTask == nil else { return }
         notifications.openInbox = { [weak self] in self?.openInbox() }
         mailbox.onNewInvoices = { [weak self] count, historical in
             self?.notifications.notify(count: count, historical: historical)
         }
+        inbox.onCacheChanged = { [weak self] ids in self?.cache.scheduleMaintenance(protecting: ids) }
+        cache.onCleared = { [weak self] in self?.inbox.objectWillChange.send() }
+        cache.onAutomaticFailure = { [weak self] message in
+            self?.showMainWindow()
+            let alert = NSAlert()
+            alert.messageText = "缓存自动清理已停止"
+            alert.informativeText = message + "\n请检查权限后，在设置的缓存管理中选择重试。"
+            alert.addButton(withTitle: "知道了")
+            alert.runModal()
+        }
+        cache.start()
         Task { await inbox.refreshMissingTitles() }
         pollingTask = Task { await mailbox.run(inbox: inbox) }
     }
@@ -55,7 +73,7 @@ import SwiftUI
         return saveBeforeExit?() ?? true
     }
 
-    func stop() { pollingTask?.cancel(); pollingTask = nil }
+    func stop() { pollingTask?.cancel(); pollingTask = nil; cache.stop() }
 }
 
 @MainActor final class BackgroundAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
@@ -143,7 +161,7 @@ struct BackgroundStatusMenu: View {
         else if let date = mailbox.lastSyncAt {
             Text("上次同步：\(date.formatted(date: .omitted, time: .shortened))")
         } else { Text("尚未完成邮箱同步") }
-        Text("未分配发票：\(inbox.items.filter { $0.projectID == nil }.count) 张")
+        Text("未分配发票：\(inbox.items.filter { $0.projectID == nil && $0.documentKind != .nonInvoice }.count) 张")
         Text("\(mailbox.status.prefix(40))\(mailbox.status.count > 40 ? "…" : "")").help(mailbox.status)
         Divider()
         Button("打开报销单助手") {

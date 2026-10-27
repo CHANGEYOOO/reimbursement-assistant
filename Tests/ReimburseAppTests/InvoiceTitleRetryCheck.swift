@@ -69,6 +69,7 @@ import Foundation
         NSGraphicsContext.saveGraphicsState()
         NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: false)
         let font: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 12)]
+        ("电子发票（普通发票） 发票号码：12345678901234567890\n开票日期：2026年10月27日" as NSString).draw(at: CGPoint(x: 30, y: 360), withAttributes: font)
         ("购买方信息\n名称：测试购买公司\n纳税人识别号：TEST" as NSString).draw(at: CGPoint(x: 30, y: 300), withAttributes: font)
         ("销售方信息\n名称：测试销售公司\n纳税人识别号：SELLER" as NSString).draw(at: CGPoint(x: 320, y: 300), withAttributes: font)
         ("价税合计 ¥39.00\n*餐饮服务*餐费" as NSString).draw(at: CGPoint(x: 30, y: 150), withAttributes: font)

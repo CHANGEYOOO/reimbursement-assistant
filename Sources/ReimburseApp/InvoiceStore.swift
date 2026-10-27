@@ -281,18 +281,8 @@ public struct Invoice: Identifiable, Codable, Sendable {
     }
 
     nonisolated static func recognizeTotal(at url: URL) throws -> Decimal? {
-        if url.pathExtension.lowercased() == "pdf", let pdf = PDFDocument(url: url) {
-            if let amount = totalAmount(in: pdf.string ?? "") { return amount }
-            for index in 0..<min(pdf.pageCount, 3) {
-                guard let image = pdf.page(at: index)?.thumbnail(of: CGSize(width: 1800, height: 2400), for: .mediaBox)
-                    .cgImage(forProposedRect: nil, context: nil, hints: nil) else { continue }
-                if let amount = try totalAmount(in: recognizedText(image)) { return amount }
-            }
-            return nil
-        }
-        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
-              let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else { return nil }
-        return try totalAmount(in: recognizedText(image))
+        let text = try invoiceText(at: url)
+        return try InvoiceAmountRecognition.total(at: url, text: text)
     }
 
     nonisolated static func invoiceText(at url: URL) throws -> String {
@@ -319,23 +309,6 @@ public struct Invoice: Identifiable, Codable, Sendable {
     }
 
     nonisolated static func totalAmount(in text: String) -> Decimal? {
-        let lines = text.components(separatedBy: .newlines)
-        let amountPattern = #"[¥￥]\s*\d{1,9}(?:,\d{3})*(?:\.\d{1,2})?|\b\d{1,9}\.\d{2}\b"#
-        let labels = ["价税合计", "合计金额", "发票金额"]
-        var values: [Decimal] = []
-        for (index, line) in lines.enumerated() where labels.contains(where: line.contains) {
-            let nearby = lines[index..<min(lines.count, index + 9)]
-            let small = nearby.firstIndex(where: { $0.contains("小写") })
-            let candidates = small.map { position in
-                [lines[position]] + (position + 1 < lines.count ? [lines[position + 1]] : [])
-            } ?? []
-            let source = candidates.first(where: { $0.range(of: amountPattern, options: .regularExpression) != nil }) ?? line
-            guard let range = source.range(of: amountPattern, options: .regularExpression),
-                  let amount = Decimal(string: String(source[range]).replacingOccurrences(of: ",", with: "")
-                    .replacingOccurrences(of: "¥", with: "").replacingOccurrences(of: "￥", with: "")
-                    .trimmingCharacters(in: .whitespacesAndNewlines), locale: Locale(identifier: "en_US_POSIX")), amount > 0 else { continue }
-            values.append(amount)
-        }
-        return Set(values).count == 1 ? values.first : nil
+        InvoiceAmountRecognition.total(in: text)
     }
 }

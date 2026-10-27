@@ -98,7 +98,7 @@ public struct ReviewView: View {
                 HStack {
                     Label("发票箱", systemImage: "tray.full")
                     Spacer()
-                    Text("\(inbox.items.filter { $0.projectID == nil }.count)").foregroundStyle(.secondary)
+                    Text("\(inbox.items.filter { $0.projectID == nil && $0.documentKind != .nonInvoice }.count)").foregroundStyle(.secondary)
                 }.padding(8)
                     .background(controls.showingInbox ? Color.accentColor.opacity(0.15) : .clear, in: RoundedRectangle(cornerRadius: 6))
             }.buttonStyle(.plain)
