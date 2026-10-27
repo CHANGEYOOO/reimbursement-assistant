@@ -1,6 +1,8 @@
 name: Windows parity build
 on:
   workflow_dispatch:
+  push:
+    branches: [codex/windows-mac127-parity]
 permissions:
   contents: read
 jobs:
