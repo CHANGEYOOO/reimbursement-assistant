@@ -6,7 +6,7 @@ import SwiftUI
     @Published private(set) var syncing = false
     @Published private(set) var lastSyncAt = UserDefaults.standard.object(forKey: "reimbursement.mail.lastSync." + QQMailboxConfiguration.address) as? Date
     var onNewInvoices: ((Int, Bool) -> Void)?
-    @Published private(set) var status = "连接 QQ 邮箱后，可自动收集发票邮件信息，附件按需下载。"
+    @Published private(set) var status = "连接 QQ 邮箱后，新收到的发票附件会自动下载并识别。"
     @Published private(set) var manualMessages: [MailboxManualNotice] = []
 
     func configurationChanged() {
@@ -34,12 +34,12 @@ import SwiftUI
             let key = "reimbursement.mail.processed.\(account)"
             let processed = Set(UserDefaults.standard.stringArray(forKey: key) ?? [])
             let since = QQMailboxConfiguration.since
-            let baselineKey = "reimbursement.mail.notificationSince.\(account)"
             let pendingKey = "reimbursement.mail.pendingNotificationCount.\(account)"
-            let historical = InvoiceNotificationPolicy.isHistorical(since: since,
-                previousSince: UserDefaults.standard.object(forKey: baselineKey) as? Date)
+            let automaticKey = "reimbursement.mail.automaticDownloadsSince.\(account)"
+            let automaticSince = UserDefaults.standard.object(forKey: automaticKey) as? Date ?? Date()
+            UserDefaults.standard.set(automaticSince, forKey: automaticKey)
             manualMessages = Self.notices(account: account)
-            status = "正在收集发票邮件信息，不下载附件…"
+            status = "正在收集邮件并准备识别新发票…"
             try await QQMailboxClient.fetch(credentials: credentials, since: since,
                 excluding: processed) { message in
                 try await MainActor.run {
@@ -48,9 +48,12 @@ import SwiftUI
                     }
                     if !message.attachments.isEmpty {
                         let before = inbox.items.count
-                        try inbox.registerRemote(message)
-                        let added = max(0, inbox.items.count - before)
-                        UserDefaults.standard.set(UserDefaults.standard.integer(forKey: pendingKey) + added, forKey: pendingKey)
+                        let automatic = message.receivedAt >= automaticSince
+                        try inbox.registerRemote(message, automaticallyDownload: automatic)
+                        if !automatic {
+                            let added = max(0, inbox.items.count - before)
+                            UserDefaults.standard.set(UserDefaults.standard.integer(forKey: pendingKey) + added, forKey: pendingKey)
+                        }
                     }
                     if message.attachments.isEmpty && message.hasDownloadLink {
                         if !self.manualMessages.contains(where: { $0.id == message.id }) {
@@ -68,10 +71,19 @@ import SwiftUI
             lastSyncAt = Date()
             UserDefaults.standard.set(lastSyncAt, forKey: "reimbursement.mail.lastSync.\(account)")
             let pending = UserDefaults.standard.integer(forKey: pendingKey)
-            if pending > 0 { onNewInvoices?(pending, historical) }
+            if pending > 0 { onNewInvoices?(pending, true) }
             UserDefaults.standard.set(0, forKey: pendingKey)
-            UserDefaults.standard.set(since, forKey: baselineKey)
-            status = "同步完成，新增 \(pending) 张，附件未自动下载。"
+            status = "正在自动下载并识别新附件…"
+            let result = await inbox.downloadPendingAttachments(account: account) {
+                QQMailboxConfiguration.revision == revision && QQMailboxConfiguration.enabled && !Task.isCancelled
+            }
+            guard QQMailboxConfiguration.revision == revision, QQMailboxConfiguration.enabled, !Task.isCancelled else {
+                throw CancellationError()
+            }
+            if result.accepted > 0 { onNewInvoices?(result.accepted, false) }
+            status = "同步完成，自动识别入箱 \(result.accepted) 张发票。"
+                + (pending > 0 ? "另有 \(pending) 个历史附件可按需下载。" : "")
+                + (result.failed > 0 ? "\(result.failed) 个附件下载未完成，将在下次同步重试，也可手动下载。" : "")
         } catch is CancellationError {
             status = "同步已停止，已收集的信息保留。"
         } catch {
@@ -113,9 +125,9 @@ struct QQMailboxSettingsView: View {
                 .foregroundStyle(.secondary)
             TextField("QQ 邮箱地址", text: $state.address).textFieldStyle(.roundedBorder)
             SecureField("邮箱授权码（留空保留此邮箱已保存的授权码）", text: $state.code).textFieldStyle(.roundedBorder)
-            Toggle("启用自动收集邮件信息", isOn: $state.enabled)
+            Toggle("启用自动收集发票", isOn: $state.enabled)
             DatePicker("从这个日期开始收集", selection: $state.since, in: ...Date(), displayedComponents: .date)
-            Text("软件运行且电脑联网、未休眠时，每 5 分钟检查一次。只读取邮件信息，不改变已读状态或删除邮件。附件仅在点击下载、预览或加入项目时取回；未下载前，金额和抬头可能暂时未知。")
+            Text("软件运行且电脑联网、未休眠时，每 5 分钟检查一次。新收到的发票附件自动下载并识别，合格发票进入发票箱，缓存按设置上限清理。启用前的历史附件仍按需下载。不会改变邮件已读状态或删除邮件。")
                 .font(.callout).foregroundStyle(.secondary)
             if !state.message.isEmpty { Text(state.message).font(.callout).textSelection(.enabled) }
             HStack {

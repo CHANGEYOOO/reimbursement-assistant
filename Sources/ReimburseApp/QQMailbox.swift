@@ -131,7 +131,7 @@ public enum QQMailboxClient {
             let metadata = try await session.command("UID FETCH \(uid) (INTERNALDATE BODYSTRUCTURE BODY.PEEK[HEADER.FIELDS (SUBJECT FROM)])")
             let message = try QQMailboxParser.message(metadata, account: credentials.address, uidValidity: validity, uid: uid)
             guard message.receivedAt >= since else { continue }
-            // Metadata only: attachment bodies stay on the mail server until explicitly requested.
+            // Fetch metadata first; the sync controller decides which new attachments to download.
             try await receive(message)
         }
     }

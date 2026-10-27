@@ -12,8 +12,8 @@ enum InvoiceNotificationPolicy {
     static func text(count: Int, historical: Bool) -> (title: String, body: String)? {
         guard count > 0 else { return nil }
         return historical
-            ? ("已收集 \(count) 张发票", "历史发票已整理到发票箱，附件未下载。点击查看。")
-            : ("收到 \(count) 张新发票", "已收集到发票箱，附件未下载。点击查看。")
+            ? ("已收集 \(count) 个历史附件", "历史邮件附件已整理到待下载附件，尚未检查是否为发票。点击查看。")
+            : ("收到 \(count) 张新发票", "已自动下载、识别并加入发票箱。点击查看。")
     }
 }
 

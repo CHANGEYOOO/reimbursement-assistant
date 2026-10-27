@@ -11,8 +11,8 @@ import Foundation
         precondition(InvoiceNotificationPolicy.text(count: 0, historical: false) == nil)
         precondition(InvoiceNotificationPolicy.text(count: -1, historical: true) == nil)
         let batch = InvoiceNotificationPolicy.text(count: 3, historical: false)!
-        precondition(batch.title == "收到 3 张新发票" && batch.body.contains("附件未下载"))
-        precondition(InvoiceNotificationPolicy.text(count: 298, historical: true)!.title == "已收集 298 张发票")
+        precondition(batch.title == "收到 3 张新发票" && batch.body.contains("已自动下载、识别"))
+        precondition(InvoiceNotificationPolicy.text(count: 298, historical: true)!.title == "已收集 298 个历史附件")
         precondition(!batch.body.contains("抬头") && !batch.body.contains("金额"))
         print("Invoice notification policy checks passed; no system permission or notifications requested")
     }

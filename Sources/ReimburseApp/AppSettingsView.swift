@@ -45,7 +45,7 @@ private struct BackgroundSettingsView: View {
                 Task { await startup.setEnabled(value) }
             })).disabled(startup.working)
             if !startup.message.isEmpty { Text(startup.message).font(.caption).foregroundStyle(.secondary) }
-            Text("以上开关即时生效。关闭主窗口只隐藏窗口，软件仍会后台收票；从顶部菜单栏选择“退出”或按 ⌘Q 才会停止。电脑需联网且未休眠，附件仍按需下载。")
+            Text("以上开关即时生效。关闭主窗口只隐藏窗口，软件仍会后台收票；从顶部菜单栏选择“退出”或按 ⌘Q 才会停止。电脑需联网且未休眠，新发票附件自动下载识别，历史附件按需下载。")
                 .font(.callout).foregroundStyle(.secondary)
             Spacer()
         }

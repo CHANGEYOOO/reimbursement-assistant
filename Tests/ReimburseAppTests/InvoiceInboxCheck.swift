@@ -91,6 +91,62 @@ import AppKit
         precondition(!migrated.items.first { $0.id == rejected.id }!.isAcceptedInvoice)
         await migrated.refreshMissingTitles()
         precondition(!migrated.items.first { $0.id == rejected.id }!.isAcceptedInvoice, "Legacy manual type confirmations cannot bypass the current whitelist")
+        let queueDirectory = root.appendingPathComponent("automatic-box", isDirectory: true)
+        let queue = InvoiceInboxStore(directory: queueDirectory, projectsDirectory: projects)
+        func mail(_ uid: UInt64, account: String = "test@qq.com") -> InvoiceMailMessage {
+            let reference = MailAttachmentReference(account: account, uidValidity: "99", uid: uid, partID: "2", encoding: "BASE64", size: 100)
+            return InvoiceMailMessage(id: "auto\(uid)", receivedAt: received, subject: "发票", sender: "商家",
+                attachments: [InvoiceMailAttachment(filename: "电子发票金额88.00.pdf", remote: reference)], hasDownloadLink: false)
+        }
+        try queue.registerRemote(mail(30))
+        try queue.registerRemote(mail(30), automaticallyDownload: true)
+        precondition(queue.items[0].autoDownloadPending == false, "Historical records must not be promoted on repeated sync")
+        for uid: UInt64 in [31, 32, 33] { try queue.registerRemote(mail(uid), automaticallyDownload: true) }
+        try queue.registerRemote(mail(34, account: "other@qq.com"), automaticallyDownload: true)
+        let validID = queue.items.first { $0.mailID == "auto31" }!.id
+        let reportID = queue.items.first { $0.mailID == "auto32" }!.id
+        let failedID = queue.items.first { $0.mailID == "auto33" }!.id
+        try makePDF().write(to: queue.sourceURL(for: queue.items.first { $0.id == validID }!))
+        try makePDF(title: "费用报销单").write(to: queue.sourceURL(for: queue.items.first { $0.id == reportID }!))
+        let paused = await queue.downloadPendingAttachments(account: "test@qq.com", shouldContinue: { false })
+        precondition(paused.accepted == 0 && paused.failed == 0 && queue.items.first { $0.id == validID }!.autoDownloadPending == true)
+        let automatic = await queue.downloadPendingAttachments(account: "test@qq.com", shouldContinue: { true }, downloadAttachment: { id in
+            if id == failedID { throw CocoaError(.fileReadUnknown) }
+            return try await queue.download(id)
+        })
+        precondition(automatic.accepted == 1 && automatic.failed == 1, "Only automatically validated invoice results count; reports do not")
+        precondition(queue.items.first { $0.id == validID }!.autoDownloadPending == false)
+        precondition(queue.items.first { $0.id == reportID }!.autoDownloadPending == false, "Rejected content completes processing instead of retrying forever")
+        let resumed = InvoiceInboxStore(directory: queueDirectory, projectsDirectory: projects)
+        precondition(resumed.items.first { $0.id == failedID }!.autoDownloadPending == true, "Download failure remains queued after restart")
+        precondition(resumed.items.first { $0.mailID == "auto34" }!.autoDownloadPending == true, "Other mailbox queues are not processed")
+        let retained = root.appendingPathComponent("retained-cache.pdf")
+        try FileManager.default.moveItem(at: resumed.sourceURL(for: resumed.items.first { $0.id == validID }!), to: retained)
+        var retried: [UUID] = []
+        _ = await resumed.downloadPendingAttachments(account: "test@qq.com", shouldContinue: { true }, downloadAttachment: { id in
+            retried.append(id)
+            throw CocoaError(.fileReadUnknown)
+        })
+        precondition(retried == [failedID], "Completed attachments must not redownload after cache eviction; historical and other accounts stay untouched")
+        let retryDirectory = root.appendingPathComponent("retry-box", isDirectory: true)
+        let interrupted = InvoiceInboxStore(directory: retryDirectory, projectsDirectory: projects)
+        await interrupted.importFiles([local])
+        let interruptedID = interrupted.items[0].id
+        try interrupted.update(interruptedID, amount: "49.50", buyerTitle: "保留手动抬头")
+        let retryMetadata = retryDirectory.appendingPathComponent("inbox.json")
+        var interruptedSnapshot = try JSONSerialization.jsonObject(with: Data(contentsOf: retryMetadata)) as! [String: Any]
+        var interruptedItems = interruptedSnapshot["items"] as! [[String: Any]]
+        interruptedItems[0].removeValue(forKey: "documentPolicyRevision")
+        interruptedItems[0].removeValue(forKey: "documentKind")
+        interruptedItems[0]["warning"] = "正在识别金额和抬头…"
+        interruptedSnapshot["items"] = interruptedItems
+        try JSONSerialization.data(withJSONObject: interruptedSnapshot).write(to: retryMetadata)
+        let retriedImport = InvoiceInboxStore(directory: retryDirectory, projectsDirectory: projects)
+        await retriedImport.importFiles([local])
+        precondition(retriedImport.items.count == 1 && retriedImport.items[0].id == interruptedID && retriedImport.items[0].isAcceptedInvoice,
+            "Duplicate content from a retried ZIP/import must finish interrupted classification rather than skip forever")
+        precondition(retriedImport.items[0].amount == Decimal(string: "49.50") && retriedImport.items[0].buyerTitle == "保留手动抬头" && retriedImport.items[0].warning == nil,
+            "Classification retry preserves saved money and buyer edits and clears stale processing warnings")
         let details = InvoiceInboxStore.invoiceDetails(in: "购买方信息\n名称：示例购买公司\n纳税人识别号：123\n销售方信息\n名称：示例销售公司\n*餐饮服务*餐费")
         precondition(details.buyer == "示例购买公司" && details.seller == "示例销售公司" && details.item.contains("餐费"))
         func unsafeArchive(name: String, attributes: UInt32 = 0) -> Data {

@@ -62,7 +62,7 @@ struct InvoiceInboxView: View {
             }
             if !syncStatus.isEmpty { Text(syncStatus).font(.caption).foregroundStyle(.secondary) }
             filters
-            Text("只收录通过自动检查的电子普通发票；邮箱新附件请在“待下载附件”中按需下载识别。")
+            Text("只收录通过自动检查的电子普通发票；新收附件自动下载识别；历史或下载失败的附件可在“待下载附件”中手动下载。")
                 .font(.caption).foregroundStyle(.secondary)
             HStack {
                 Toggle("全选当前结果", isOn: Binding(get: { !selectable.isEmpty && selectable.isSubset(of: controls.selected) }, set: {

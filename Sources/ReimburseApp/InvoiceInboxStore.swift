@@ -22,6 +22,7 @@ public struct InboxInvoice: Identifiable, Codable, Sendable {
     public var documentKind: InvoiceDocumentKind? = nil
     public var documentReason: String? = nil
     public var documentPolicyRevision: Int? = nil
+    public var autoDownloadPending: Bool? = nil
 
     public var isAcceptedInvoice: Bool {
         documentKind == .invoice && documentPolicyRevision == InvoiceDocumentClassifier.policyRevision
@@ -47,6 +48,7 @@ private struct InboxSnapshot: Codable {
     public var cacheDirectoryURL: URL { filesDirectory }
     private var expandedArchives: [String: Set<UUID>] = [:]
     private var canWrite = true
+    private var automaticDownloadRunning = false
     private var filesDirectory: URL { directory.appendingPathComponent("files", isDirectory: true) }
 
     public init(directory: URL? = nil, projectsDirectory: URL? = nil) {
@@ -91,7 +93,7 @@ private struct InboxSnapshot: Codable {
         "\(remote.account)|\(remote.uidValidity)|\(remote.uid)|\(remote.partID)"
     }
 
-    public func registerRemote(_ message: InvoiceMailMessage) throws {
+    public func registerRemote(_ message: InvoiceMailMessage, automaticallyDownload: Bool = false) throws {
         var updated = items
         for attachment in message.attachments {
             let key = remoteKey(attachment.remote)
@@ -107,10 +109,44 @@ private struct InboxSnapshot: Codable {
                 warning: nil, receivedAt: message.receivedAt, buyerTitle: "", sellerTitle: "", itemDescription: "",
                 source: message.sender + " · " + message.subject, mailID: message.id, projectID: nil, projectInvoiceID: nil)
             item.remote = attachment.remote
+            item.autoDownloadPending = automaticallyDownload
             updated.append(item)
         }
         try persist(updated)
         items = updated
+    }
+
+    public func downloadPendingAttachments(account: String, shouldContinue: @MainActor () -> Bool = { true }) async -> (accepted: Int, failed: Int) {
+        await downloadPendingAttachments(account: account, shouldContinue: shouldContinue, downloadAttachment: { try await self.download($0) })
+    }
+
+    func downloadPendingAttachments(account: String, shouldContinue: @MainActor () -> Bool,
+                                    downloadAttachment: @MainActor (UUID) async throws -> Set<UUID>) async -> (accepted: Int, failed: Int) {
+        guard canWrite, !automaticDownloadRunning else { return (0, 0) }
+        automaticDownloadRunning = true
+        defer { automaticDownloadRunning = false }
+        let ids = items.filter { $0.autoDownloadPending == true && $0.remote?.account == account }.map(\.id)
+        var accepted: Set<UUID> = []
+        var failed = 0
+        for id in ids {
+            guard !Task.isCancelled, shouldContinue() else { break }
+            guard items.contains(where: { $0.id == id && $0.autoDownloadPending == true }), !pendingIDs.contains(id) else { continue }
+            do {
+                let downloaded = try await downloadAttachment(id)
+                if let index = items.firstIndex(where: { $0.id == id }), items[index].autoDownloadPending == true {
+                    var updated = items
+                    updated[index].autoDownloadPending = false
+                    try persist(updated)
+                    items = updated
+                }
+                accepted.formUnion(items.filter { downloaded.contains($0.id) && $0.isAcceptedInvoice }.map(\.id))
+            } catch is CancellationError { break }
+            catch {
+                failed += 1
+                lastError = "自动下载发票失败，下次同步时重试：\(error.localizedDescription)"
+            }
+        }
+        return (accepted.count, failed)
     }
 
     @discardableResult public func download(_ id: UUID) async throws -> Set<UUID> {
@@ -179,6 +215,7 @@ private struct InboxSnapshot: Codable {
         guard let index = items.firstIndex(where: { $0.id == id }) else { return }
         var updated = items
         updated[index].lastAccessedAt = Date()
+        updated[index].autoDownloadPending = false
         try persist(updated)
         items = updated
     }
@@ -232,7 +269,16 @@ private struct InboxSnapshot: Codable {
         }
         guard ["pdf", "png", "jpg", "jpeg", "heic", "heif"].contains(ext) else { throw failure("不支持的发票格式：\(name)") }
         let fingerprint = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
-        guard !items.contains(where: { $0.fingerprint == fingerprint }) else { return }
+        if let existing = items.first(where: { $0.fingerprint == fingerprint }) {
+            guard existing.documentPolicyRevision != InvoiceDocumentClassifier.policyRevision else { return }
+            guard !pendingIDs.contains(existing.id) else { throw failure("附件正在识别，请稍后重试。") }
+            let destination = sourceURL(for: existing)
+            if !isDownloaded(existing) { try data.write(to: destination, options: .atomic) }
+            pendingIDs.insert(existing.id)
+            defer { pendingIDs.remove(existing.id); onCacheChanged?([]) }
+            try await recognize(existing.id, at: destination, namedAmount: existing.amount)
+            return
+        }
         let id = UUID()
         let stored = id.uuidString + "." + ext
         let destination = filesDirectory.appendingPathComponent(stored)
