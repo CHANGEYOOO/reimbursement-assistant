@@ -5,6 +5,7 @@ public struct DraftSummary: Identifiable, Hashable {
     public let title: String
     public let updatedAt: Date
     public let url: URL
+    public var createdAt: Date = .distantPast
 }
 
 struct DraftSnapshot: Codable {
@@ -21,8 +22,12 @@ struct DraftSnapshot: Codable {
     private static let lastOpenedKey = "reimbursement.lastDraftID"
     private static let filename = "draft.json"
 
+    static var directoryOverride: URL?
+    static var defaults = UserDefaults.standard
+
     public static var directory: URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        if let directoryOverride { return directoryOverride }
+        return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("报销单助手/Drafts", isDirectory: true)
     }
 
@@ -33,9 +38,13 @@ struct DraftSnapshot: Codable {
                 guard let id = UUID(uuidString: url.lastPathComponent),
                       FileManager.default.fileExists(atPath: url.appendingPathComponent(filename).path) else { return nil }
                 let snapshot = try read(url)
-                return DraftSummary(id: id, title: snapshot.title, updatedAt: snapshot.updatedAt, url: url)
+                let createdAt = try url.resourceValues(forKeys: [.creationDateKey]).creationDate ?? .distantPast
+                return DraftSummary(id: id, title: snapshot.title, updatedAt: snapshot.updatedAt, url: url, createdAt: createdAt)
             }
-            .sorted { $0.updatedAt > $1.updatedAt }
+            .sorted {
+                if $0.createdAt != $1.createdAt { return $0.createdAt > $1.createdAt }
+                return $0.id.uuidString < $1.id.uuidString
+            }
     }
 
     public static func create(title: String = "未命名报销单") throws -> DraftSummary {
@@ -44,7 +53,7 @@ struct DraftSnapshot: Codable {
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         let snapshot = DraftSnapshot(title: cleanedTitle(title), updatedAt: Date(), expenses: [], pendingIDs: [], confirmedWarnings: [], recognizedTexts: [:], amountCandidates: [:])
         try write(snapshot, to: url)
-        UserDefaults.standard.set(id.uuidString, forKey: lastOpenedKey)
+        defaults.set(id.uuidString, forKey: lastOpenedKey)
         return DraftSummary(id: id, title: snapshot.title, updatedAt: snapshot.updatedAt, url: url)
     }
 
@@ -64,20 +73,31 @@ struct DraftSnapshot: Codable {
             }
         }
         let snapshot = store.snapshot(title: cleanedTitle(title))
+        let previous = try read(draft.url)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        if snapshot.title == previous.title,
+           snapshot.pendingIDs == previous.pendingIDs,
+           snapshot.confirmedWarnings == previous.confirmedWarnings,
+           snapshot.recognizedTexts == previous.recognizedTexts,
+           snapshot.amountCandidates == previous.amountCandidates,
+           try encoder.encode(snapshot.expenses) == encoder.encode(previous.expenses) {
+            return DraftSummary(id: draft.id, title: previous.title, updatedAt: previous.updatedAt, url: draft.url, createdAt: draft.createdAt)
+        }
         try write(snapshot, to: draft.url)
-        UserDefaults.standard.set(draft.id.uuidString, forKey: lastOpenedKey)
-        return DraftSummary(id: draft.id, title: snapshot.title, updatedAt: snapshot.updatedAt, url: draft.url)
+        defaults.set(draft.id.uuidString, forKey: lastOpenedKey)
+        return DraftSummary(id: draft.id, title: snapshot.title, updatedAt: snapshot.updatedAt, url: draft.url, createdAt: draft.createdAt)
     }
 
     @discardableResult public static func open(_ draft: DraftSummary, into store: ExpenseStore) throws -> DraftSummary {
         let snapshot = try read(draft.url)
         store.restore(snapshot)
-        UserDefaults.standard.set(draft.id.uuidString, forKey: lastOpenedKey)
-        return DraftSummary(id: draft.id, title: snapshot.title, updatedAt: snapshot.updatedAt, url: draft.url)
+        defaults.set(draft.id.uuidString, forKey: lastOpenedKey)
+        return DraftSummary(id: draft.id, title: snapshot.title, updatedAt: snapshot.updatedAt, url: draft.url, createdAt: draft.createdAt)
     }
 
     public static func lastOpened() -> UUID? {
-        UserDefaults.standard.string(forKey: lastOpenedKey).flatMap(UUID.init(uuidString:))
+        defaults.string(forKey: lastOpenedKey).flatMap(UUID.init(uuidString:))
     }
 
     public static func rename(_ draft: DraftSummary, to title: String) throws -> DraftSummary {
@@ -87,10 +107,11 @@ struct DraftSnapshot: Codable {
                           userInfo: [NSLocalizedDescriptionKey: "报销单名称不能为空。"])
         }
         var snapshot = try read(draft.url)
+        guard snapshot.title != title else { return draft }
         snapshot.title = title
         snapshot.updatedAt = Date()
         try write(snapshot, to: draft.url)
-        return DraftSummary(id: draft.id, title: title, updatedAt: snapshot.updatedAt, url: draft.url)
+        return DraftSummary(id: draft.id, title: title, updatedAt: snapshot.updatedAt, url: draft.url, createdAt: draft.createdAt)
     }
 
     public static func moveToTrash(_ draft: DraftSummary) throws {
@@ -108,7 +129,7 @@ struct DraftSnapshot: Codable {
             throw NSError(domain: "DraftStorage", code: Int(process.terminationStatus),
                           userInfo: [NSLocalizedDescriptionKey: "移入废纸篓失败，报销单未删除。请检查权限后重试。"])
         }
-        if lastOpened() == draft.id { UserDefaults.standard.removeObject(forKey: lastOpenedKey) }
+        if lastOpened() == draft.id { defaults.removeObject(forKey: lastOpenedKey) }
     }
 
     private static func cleanedTitle(_ title: String) -> String {

@@ -31,21 +31,7 @@ public struct ReviewView: View {
         HSplitView {
             sidebar.frame(minWidth: 180, idealWidth: 200, maxWidth: 250)
             if controls.showingInbox {
-                VStack(spacing: 0) {
-                    if !mailbox.manualMessages.isEmpty {
-                        DisclosureGroup("\(mailbox.manualMessages.count) 封发票邮件未发现可导入附件") {
-                            ForEach(mailbox.manualMessages) { notice in
-                                HStack {
-                                    Text(notice.subject.isEmpty ? "无主题邮件" : notice.subject).lineLimit(1)
-                                    Text(notice.receivedAt, style: .date).foregroundStyle(.secondary)
-                                    Spacer()
-                                    Button("已手动处理") { mailbox.dismissNotice(notice.id) }
-                                }
-                            }
-                            Text("请在 QQ 邮箱查看这些邮件；可能需要通过邮件内链接下载，再手动导入。")
-                                .font(.caption).foregroundStyle(.secondary)
-                        }.padding(.horizontal, 20).padding(.top, 12)
-                    }
+                InvoiceMailboxContent(mailbox: mailbox) {
                     InvoiceInboxView(inbox: inbox, projects: controls.availableDrafts,
                         targetProject: controls.inboxTarget,
                         sync: { Task { await mailbox.sync(inbox: inbox) } },
@@ -57,6 +43,7 @@ public struct ReviewView: View {
                 }.frame(minWidth: 800, minHeight: 620)
             } else { projectContent }
         }
+        .attachmentPreviewHost(url: $controls.previewURL)
         .onAppear {
             restoreDraft()
             refreshProjects()
@@ -70,6 +57,19 @@ public struct ReviewView: View {
                 store.automaticallyAssistUnresolvedExpenses()
             }
             if runtime.inboxOpenRequest > 0 { openInbox(target: nil) }
+        }
+        .onChange(of: controls.previewURL) { oldURL, newURL in
+            if let oldURL, let item = inbox.items.first(where: {
+                inbox.sourceURL(for: $0).standardizedFileURL == oldURL.standardizedFileURL
+            }) {
+                inbox.activeCacheIDs.remove(item.id)
+            }
+            if let newURL, let item = inbox.items.first(where: {
+                inbox.sourceURL(for: $0).standardizedFileURL == newURL.standardizedFileURL
+            }) {
+                inbox.activeCacheIDs.insert(item.id)
+            }
+            if newURL == nil { runtime.cache.scheduleMaintenance(protecting: []) }
         }
         .onChange(of: runtime.inboxOpenRequest) { _, _ in openInbox(target: nil) }
         .onReceive(store.objectWillChange) { _ in scheduleSave() }
@@ -103,21 +103,23 @@ public struct ReviewView: View {
                     .background(controls.showingInbox ? Color.accentColor.opacity(0.15) : .clear, in: RoundedRectangle(cornerRadius: 6))
             }.buttonStyle(.plain)
             Divider()
-            Text("我的项目").font(.caption).foregroundStyle(.secondary)
+            Text("报销项目（报销单）").font(.caption).foregroundStyle(.secondary)
             ScrollView {
                 VStack(alignment: .leading, spacing: 4) {
                     ForEach(controls.availableDrafts) { project in
                         Button {
-                            controls.saveTask?.cancel()
-                            saveCurrent()
-                            guard controls.saveStatus != "保存失败" else { return }
-                            openDraft(project)
+                            switchDraft(project)
                             controls.showingInbox = false
                         } label: {
                             Text(project.title).lineLimit(2).frame(maxWidth: .infinity, alignment: .leading)
                                 .padding(8)
                                 .background(!controls.showingInbox && controls.draft?.id == project.id ? Color.accentColor.opacity(0.15) : .clear, in: RoundedRectangle(cornerRadius: 6))
                         }.buttonStyle(.plain).disabled(controls.exportingInvoices)
+                        .contextMenu {
+                            Button("打开") { switchDraft(project) }
+                            Button("重命名") { renameDraft(project) }
+                            Button("移入废纸篓", role: .destructive) { trashDraft(project) }
+                        }
                     }
                 }
             }
@@ -156,9 +158,6 @@ public struct ReviewView: View {
                         .frame(maxWidth: 360)
                     Text(controls.saveStatus).font(.caption).foregroundStyle(.secondary)
                     Spacer()
-                    Button("新建报销单") { createDraft() }
-                    Button("打开 / 管理报销单") { openDraftPicker() }
-                        .disabled(controls.exportingInvoices)
                 }
                 .padding(.horizontal)
 
@@ -239,6 +238,7 @@ public struct ReviewView: View {
                                     if selection.selectedID == expense.id { selection.selectedID = nil }
                                     store.delete(expense.id)
                                 })
+                                .attachmentPreviewSource(url: expense.sourceURL)
                                 .id(expense.id)
                                 .contentShape(Rectangle())
                                 .background(selection.selectedID == expense.id ? Color.blue.opacity(0.18) : Color.clear)
@@ -333,9 +333,6 @@ public struct ReviewView: View {
                 .padding(.horizontal)
                 .padding(.bottom, 10)
             }
-            if let previewURL = controls.previewURL {
-                ImagePreview(url: previewURL) { controls.previewURL = nil }
-            }
         }
         .frame(minWidth: controls.showingOrderPreview && !controls.showingInvoices ? 1120 : 1020, minHeight: 620)
         .background {
@@ -404,32 +401,7 @@ public struct ReviewView: View {
             .padding()
             .frame(width: 620, height: 380)
         }
-        .sheet(isPresented: $controls.showingDrafts) {
-            VStack(alignment: .leading, spacing: 12) {
-                Text("管理报销单").font(.title2)
-                List(controls.availableDrafts) { item in
-                    HStack(spacing: 12) {
-                    Button {
-                        openDraft(item)
-                        controls.showingDrafts = false
-                    } label: {
-                        HStack {
-                            Text(item.title)
-                            if controls.draft?.id == item.id { Text("当前").font(.caption).foregroundStyle(.secondary) }
-                            Spacer()
-                            Text(item.updatedAt, style: .date).foregroundStyle(.secondary)
-                        }
-                    }
-                    .buttonStyle(.plain)
-                    Button("重命名") { renameDraft(item) }
-                    Button("移入废纸篓", role: .destructive) { trashDraft(item) }
-                    }
-                }
-                Button("取消") { controls.showingDrafts = false }
-            }
-            .padding()
-            .frame(width: 680, height: 360)
-        }
+
     }
 
     private var invoiceList: some View {
@@ -438,8 +410,7 @@ public struct ReviewView: View {
                 ForEach(invoices.acceptedInvoices) { invoice in
                     InvoiceRow(invoice: invoice, store: invoices,
                                preview: { url in
-                                   if url.pathExtension.lowercased() == "pdf" { NSWorkspace.shared.open(url) }
-                                   else { controls.previewURL = url }
+                                   controls.previewURL = url
                                },
                                reportError: { controls.errorMessage = $0 })
                     Divider()
@@ -513,14 +484,16 @@ public struct ReviewView: View {
         } catch { controls.errorMessage = "新建报销单失败：\(error.localizedDescription)" }
     }
 
-    private func openDraftPicker() {
+    private func switchDraft(_ selected: DraftSummary) {
+        guard !controls.exportingInvoices else { return }
+        if controls.draft?.id == selected.id {
+            controls.showingInbox = false
+            return
+        }
         controls.saveTask?.cancel()
         saveCurrent()
         guard controls.saveStatus != "保存失败" else { return }
-        do {
-            controls.availableDrafts = try DraftStorage.list()
-            controls.showingDrafts = true
-        } catch { controls.errorMessage = "读取草稿失败：\(error.localizedDescription)" }
+        openDraft(selected)
     }
 
     private func openDraft(_ selected: DraftSummary) {
@@ -542,6 +515,7 @@ public struct ReviewView: View {
     }
 
     private func renameDraft(_ selected: DraftSummary) {
+        guard !controls.exportingInvoices else { return }
         let alert = NSAlert()
         alert.messageText = "重命名报销单"
         alert.addButton(withTitle: "保存")
@@ -551,6 +525,11 @@ public struct ReviewView: View {
         alert.accessoryView = field
         alert.window.initialFirstResponder = field
         guard alert.runModal() == .alertFirstButtonReturn else { return }
+        if controls.draft?.id == selected.id {
+            controls.saveTask?.cancel()
+            saveCurrent()
+            guard controls.saveStatus != "保存失败" else { return }
+        }
         do {
             let renamed = try DraftStorage.rename(selected, to: field.stringValue)
             if controls.draft?.id == selected.id {
@@ -559,22 +538,24 @@ public struct ReviewView: View {
             }
             controls.availableDrafts = try DraftStorage.list()
         } catch {
-            controls.showingDrafts = false
             controls.errorMessage = "重命名失败：\(error.localizedDescription)"
         }
     }
 
     private func trashDraft(_ selected: DraftSummary) {
+        guard !controls.exportingInvoices else { return }
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = "将“\(selected.title)”移入废纸篓？"
-        alert.informativeText = "该报销单及其保存的订单截图和发票将一起移入废纸篓，原始导入文件不受影响。"
+        alert.informativeText = "该报销项目（报销单）及其中保存的订单截图、项目发票副本将一起移入废纸篓；发票箱中的原件及其他项目不受影响。"
         alert.addButton(withTitle: "取消")
         alert.addButton(withTitle: "移入废纸篓")
         guard alert.runModal() == .alertSecondButtonReturn else { return }
-        controls.saveTask?.cancel()
-        saveCurrent()
-        guard controls.saveStatus != "保存失败" else { return }
+        if controls.draft?.id == selected.id {
+            controls.saveTask?.cancel()
+            saveCurrent()
+            guard controls.saveStatus != "保存失败" else { return }
+        }
         do {
             try DraftStorage.moveToTrash(selected)
             if controls.draft?.id == selected.id {
@@ -588,7 +569,6 @@ public struct ReviewView: View {
             }
             controls.availableDrafts = try DraftStorage.list()
         } catch {
-            controls.showingDrafts = false
             controls.errorMessage = "操作已停止：\(error.localizedDescription)"
         }
     }
@@ -736,7 +716,6 @@ private struct InvoiceRow: View {
     @Published var isDropTarget = false
     @Published var draft: DraftSummary?
     @Published var availableDrafts: [DraftSummary] = []
-    @Published var showingDrafts = false
     @Published var showingExportIssues = false
     @Published var scrollTargetID: UUID?
     @Published var showingInvoices = false
@@ -837,11 +816,6 @@ private struct ExpenseRow: View {
                     }
                 }
                 if !expense.isDuplicate && !store.pendingIDs.contains(expense.id) {
-                    Button(store.aiPendingIDs.contains(expense.id) ? "AI 判断中…" : "AI 辅助识别") {
-                        store.classifyWithAI(expense.id)
-                    }
-                    .font(.caption)
-                    .disabled(store.aiPendingIDs.contains(expense.id) || store.recognizedTexts[expense.id]?.isEmpty != false)
                     Toggle("已人工核对", isOn: Binding(
                         get: { store.confirmedWarnings.contains(expense.id) },
                         set: { checked in

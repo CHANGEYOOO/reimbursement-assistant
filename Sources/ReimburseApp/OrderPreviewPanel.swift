@@ -34,6 +34,7 @@ struct OrderPreviewPanel: View {
                                 .aspectRatio(contentMode: .fit)
                                 .frame(width: max(1, geometry.size.width - 16) * controls.zoom)
                                 .onTapGesture { enlarge(expense.sourceURL) }
+                                .attachmentPreviewSource(url: expense.sourceURL)
                                 .accessibilityLabel("点击放大第\(expense.number)笔截图")
                                 .padding(8)
                         }

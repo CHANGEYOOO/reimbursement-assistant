@@ -136,6 +136,41 @@ public enum QQMailboxClient {
         }
     }
 
+    static func fetchBody(credentials: QQMailboxCredentials, id: String) async throws -> MailBody {
+        let identity = try MailMessageIdentity(id: id)
+        guard identity.account == credentials.address else { throw QQMailboxError.changedMailbox }
+        let session = MailSession()
+        defer { session.close() }
+        try await session.connect()
+        try await session.login(credentials)
+        let examined = try await session.command("EXAMINE INBOX")
+        guard try QQMailboxParser.uidValidity(examined) == identity.validity else { throw QQMailboxError.changedMailbox }
+        let metadata = try await session.command("UID FETCH \(identity.uid) (BODYSTRUCTURE)")
+        let parts = try QQMailboxParser.bodyParts(metadata)
+        let texts = parts.filter { $0.mime.hasPrefix("text/") }
+        guard let part = texts.last(where: { $0.mime == "text/html" }) ?? texts.first else { return MailBody(text: "", html: nil) }
+        guard part.size <= 2 * 1024 * 1024 else { throw QQMailboxError.tooLarge }
+        func load(_ part: QQMailboxParser.BodyPart) async throws -> Data {
+            let response = try await session.command("UID FETCH \(identity.uid) (BODY.PEEK[\(part.id)])", limit: 3 * 1024 * 1024)
+            guard let encoded = QQMailboxParser.literals(response).first else { throw QQMailboxError.changedMailbox }
+            return try QQMailboxParser.decodeAttachment(encoded, encoding: part.encoding)
+        }
+        var text = QQMailboxParser.decodeText(try await load(part), charset: part.charset)
+        if part.mime == "text/html" {
+            var total = 0
+            for image in parts where image.cid != nil && image.mime.hasPrefix("image/") {
+                guard let cid = image.cid, text.contains("cid:" + cid), image.size <= 512 * 1024,
+                      total + image.size <= 2 * 1024 * 1024 else { continue }
+                let bytes = try await load(image)
+                guard bytes.count <= 512 * 1024 else { continue }
+                total += bytes.count
+                text = text.replacingOccurrences(of: "cid:" + cid, with: "data:" + image.mime + ";base64," + bytes.base64EncodedString())
+            }
+            return MailBody(text: "", html: text)
+        }
+        return MailBody(text: text, html: nil)
+    }
+
     static func searchDate(_ date: Date) -> String {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")

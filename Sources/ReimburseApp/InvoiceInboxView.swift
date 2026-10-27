@@ -5,6 +5,7 @@ import UniformTypeIdentifiers
 
 @MainActor private final class InvoiceInboxControls: ObservableObject {
     @Published var selected: Set<UUID> = []
+    var previewRequest: UUID?
     @Published var buyer = "全部抬头"
     @Published var assignment = "全部状态"
     @Published var dateFilter = false
@@ -14,7 +15,6 @@ import UniformTypeIdentifiers
     @Published var edit: InboxInvoice?
     @Published var amount = ""
     @Published var title = ""
-    @Published var preview: URL?
     @Published var error: String?
     @Published var busy = false
     @Published var dropTarget = false
@@ -32,6 +32,7 @@ struct InvoiceInboxView: View {
     let syncStatus: String
     let assigned: () -> Void
     @StateObject private var controls = InvoiceInboxControls()
+    @Environment(\.attachmentPreview) private var openPreview
 
     private var filtered: [InboxInvoice] {
         inbox.items.filter { item in
@@ -101,12 +102,10 @@ struct InvoiceInboxView: View {
         }
         .padding(20)
         .overlay { if controls.dropTarget { RoundedRectangle(cornerRadius: 10).stroke(Color.accentColor, lineWidth: 3).allowsHitTesting(false) } }
+        .onDisappear { controls.previewRequest = nil }
         .onDrop(of: [.fileURL], isTargeted: $controls.dropTarget, perform: dropped)
         .sheet(isPresented: $controls.choosingProject) { projectSheet }
         .sheet(item: $controls.edit) { _ in editSheet }
-        .sheet(isPresented: Binding(get: { controls.preview != nil }, set: { if !$0 { controls.preview = nil } })) {
-            if let url = controls.preview { ImagePreview(url: url) { controls.preview = nil }.frame(minWidth: 700, minHeight: 600) }
-        }
         .confirmationDialog("删除所选发票箱记录？", isPresented: $controls.confirmingDelete, titleVisibility: .visible) {
             Button("删除记录并将缓存移入废纸篓", role: .destructive) {
                 do {
@@ -179,6 +178,11 @@ struct InvoiceInboxView: View {
                 Toggle("选择发票", isOn: Binding(get: { controls.selected.contains(item.id) }, set: {
                     if $0 { controls.selected.insert(item.id) } else { controls.selected.remove(item.id) }
                 })).labelsHidden().toggleStyle(.checkbox).disabled(pending || controls.busy)
+                Button { preview(item) } label: {
+                    AttachmentThumbnail(url: inbox.sourceURL(for: item), downloaded: downloaded)
+                }.buttonStyle(.plain).disabled(pending || controls.busy)
+                    .attachmentPreviewSource(url: inbox.sourceURL(for: item))
+                    .accessibilityLabel("预览发票附件")
                 VStack(alignment: .leading, spacing: 5) {
                     Button { preview(item) } label: {
                         Text(item.sellerTitle.isEmpty ? item.originalFilename : item.sellerTitle).font(.headline).lineLimit(2)
@@ -266,17 +270,15 @@ struct InvoiceInboxView: View {
         Task { do { try await inbox.download(item.id) } catch { controls.error = error.localizedDescription } }
     }
     private func preview(_ item: InboxInvoice) {
+        let request = UUID()
+        controls.previewRequest = request
         Task {
             do {
                 let downloadedIDs = try await inbox.download(item.id)
-                guard downloadedIDs.contains(item.id) else {
-                    controls.selected.remove(item.id)
-                    return
-                }
+                guard controls.previewRequest == request, downloadedIDs.contains(item.id) else { return }
                 let url = inbox.sourceURL(for: item)
-                if ["pdf", "zip"].contains(url.pathExtension.lowercased()) { NSWorkspace.shared.open(url) }
-                else { controls.preview = url }
-            } catch { controls.error = error.localizedDescription }
+                openPreview(url)
+            } catch { if controls.previewRequest == request { controls.error = error.localizedDescription } }
         }
     }
     private func assign(to project: DraftSummary) {

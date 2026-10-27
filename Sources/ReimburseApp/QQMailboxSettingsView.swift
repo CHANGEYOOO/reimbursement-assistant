@@ -4,12 +4,14 @@ import SwiftUI
 
 @MainActor final class MailboxSyncController: ObservableObject {
     @Published private(set) var syncing = false
+    @Published private(set) var configurationGeneration = 0
     @Published private(set) var lastSyncAt = UserDefaults.standard.object(forKey: "reimbursement.mail.lastSync." + QQMailboxConfiguration.address) as? Date
     var onNewInvoices: ((Int, Bool) -> Void)?
     @Published private(set) var status = "连接 QQ 邮箱后，新收到的发票附件会自动下载并识别。"
     @Published private(set) var manualMessages: [MailboxManualNotice] = []
 
     func configurationChanged() {
+        configurationGeneration += 1
         manualMessages = Self.notices(account: QQMailboxConfiguration.address)
         lastSyncAt = UserDefaults.standard.object(forKey: "reimbursement.mail.lastSync." + QQMailboxConfiguration.address) as? Date
         status = QQMailboxConfiguration.enabled ? "邮箱配置已保存，等待同步邮件信息。" : "自动收集已关闭，已有发票保留。"

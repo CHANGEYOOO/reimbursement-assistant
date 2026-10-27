@@ -41,13 +41,29 @@ cat > "$contents_dir/Info.plist" <<'PLIST'
     <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>CFBundleName</key><string>报销单助手</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>1.27</string>
-    <key>CFBundleVersion</key><string>31</string>
+    <key>CFBundleShortVersionString</key><string>1.28</string>
+    <key>CFBundleVersion</key><string>32</string>
     <key>LSMinimumSystemVersion</key><string>15.0</string>
     <key>NSHighResolutionCapable</key><true/>
 </dict>
 </plist>
 PLIST
+
+release_remote=$(/usr/bin/git -C "$project_dir" remote get-url origin)
+if [[ "$release_remote" == https://github.com/* ]]; then
+    release_repository="${release_remote#https://github.com/}"
+elif [[ "$release_remote" == git@github.com:* ]]; then
+    release_repository="${release_remote#git@github.com:}"
+else
+    echo "无法从 origin 读取 GitHub 更新仓库" >&2
+    exit 1
+fi
+release_repository="${release_repository%.git}"
+if [[ ! "$release_repository" =~ '^[A-Za-z0-9_-][A-Za-z0-9_.-]*/[A-Za-z0-9_-][A-Za-z0-9_.-]*$' ]]; then
+    echo "GitHub 更新仓库格式无效" >&2
+    exit 1
+fi
+/usr/libexec/PlistBuddy -c "Add :ReimbursementGitHubRepository string $release_repository" "$contents_dir/Info.plist"
 
 /usr/bin/xattr -cr "$app_dir"
 /usr/bin/codesign --force --sign - "$app_dir"

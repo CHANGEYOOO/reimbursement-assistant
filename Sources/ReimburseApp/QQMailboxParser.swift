@@ -69,6 +69,43 @@ enum QQMailboxParser {
             sender: sender, attachments: attachments, hasDownloadLink: isInvoice && !hasSupportedAttachment)
     }
 
+    struct BodyPart: Sendable {
+        let id: String
+        let mime: String
+        let charset: String
+        let encoding: String
+        let size: Int
+        let cid: String?
+    }
+    static func bodyParts(_ data: Data) throws -> [BodyPart] {
+        let text = String(decoding: data, as: UTF8.self)
+        guard let range = text.range(of: "BODYSTRUCTURE ", options: .caseInsensitive) else { throw QQMailboxError.changedMailbox }
+        var parser = StructureParser(bytes: Array(text[range.upperBound...].utf8))
+        var result: [BodyPart] = []
+        func walk(_ node: Node, prefix: String) {
+            guard let list = node.list, !list.isEmpty, result.count < 64 else { return }
+            if list[0].list != nil {
+                for (i, child) in list.prefix(while: { $0.list != nil }).enumerated() {
+                    walk(child, prefix: prefix.isEmpty ? "\(i + 1)" : "\(prefix).\(i + 1)")
+                }
+                return
+            }
+            guard list.count >= 7, let type = list[0].string?.lowercased(), let subtype = list[1].string?.lowercased(),
+                  let size = Int(list[6].string ?? ""), size >= 0 else { return }
+            let dispositionIndex = type == "text" ? 9 : 8
+            let disposition = list.count > dispositionIndex ? list[dispositionIndex].list?.first?.string?.uppercased() : nil
+            guard disposition != "ATTACHMENT", parameter("NAME", in: list[2].list) == nil || type == "image" else { return }
+            let mime = type + "/" + subtype
+            guard ["text/plain", "text/html", "image/png", "image/jpeg", "image/gif"].contains(mime) else { return }
+            let cid = list[3].string?.trimmingCharacters(in: CharacterSet(charactersIn: "<>"))
+            guard type == "text" || cid != nil else { return }
+            result.append(BodyPart(id: prefix.isEmpty ? "1" : prefix, mime: mime,
+                charset: parameter("CHARSET", in: list[2].list) ?? "UTF-8", encoding: list[5].string ?? "7BIT", size: size, cid: cid))
+        }
+        walk(try parser.node(), prefix: "")
+        return result
+    }
+
     private enum Node {
         case atom(String), list([Node])
         var string: String? { if case .atom(let value) = self { return value.uppercased() == "NIL" ? nil : value }; return nil }
@@ -203,7 +240,7 @@ enum QQMailboxParser {
         output += ns.substring(from: end)
         return output
     }
-    private static func decodeText(_ data: Data, charset: String) -> String {
+    static func decodeText(_ data: Data, charset: String) -> String {
         let encoding: String.Encoding
         switch charset.uppercased() {
         case "GB2312", "GBK", "GB18030": encoding = String.Encoding(rawValue: CFStringConvertEncodingToNSStringEncoding(CFStringEncoding(CFStringEncodings.GB_18030_2000.rawValue)))
