@@ -80,7 +80,7 @@ internal static class Program
             var stage = ExtractVerifiedPayloadAsync(target, (_, _) => { }, preserveOnFailure: true).GetAwaiter().GetResult();
             using (var executable = File.OpenRead(Path.Combine(stage, AppExe)))
                 if (executable.ReadByte() != 'M' || executable.ReadByte() != 'Z') throw new InvalidDataException("Payload app is not a Windows executable.");
-            var files = Directory.EnumerateFiles(stage, "*", SearchOption.AllDirectories).ToList();
+            var files = Directory.EnumerateFiles(stage, "*", System.IO.SearchOption.AllDirectories).ToList();
             var result = new { passed = true, payloadFiles = files.Count, bytes = files.Sum(file => new FileInfo(file).Length),
                 runtimeBundled = File.Exists(Path.Combine(stage, ".installer", "vc_redist.x64.exe")), fixtureDirectory = root,
                 checks = "Embedded ZIP path/size/duplicate/link validation, every file SHA256, Windows executable header, protected-data target rejection. No registry, UAC, installation, uninstall or user settings accessed." };
@@ -227,7 +227,7 @@ internal static class Program
         registry.SetValue("UninstallString", "\"" + uninstaller + "\" --uninstall");
         registry.SetValue("NoModify", 1, RegistryValueKind.DWord);
         registry.SetValue("NoRepair", 1, RegistryValueKind.DWord);
-        registry.SetValue("EstimatedSize", (int)Math.Min(int.MaxValue, Directory.EnumerateFiles(target, "*", SearchOption.AllDirectories).Sum(f => new FileInfo(f).Length) / 1024), RegistryValueKind.DWord);
+        registry.SetValue("EstimatedSize", (int)Math.Min(int.MaxValue, Directory.EnumerateFiles(target, "*", System.IO.SearchOption.AllDirectories).Sum(f => new FileInfo(f).Length) / 1024), RegistryValueKind.DWord);
         if (hadExisting) RecycleDirectory(backup);
     }
 

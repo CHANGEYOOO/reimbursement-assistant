@@ -395,11 +395,12 @@ public sealed class MainForm : Form
         panel.Click += (_, _) => SelectRow(row.Id);
     }
 
-    private static Bitmap LoadPreview(string path)
+    private static Bitmap LoadPreview(string path, int maximumWidth = 240)
     {
         using var stream = new MemoryStream(ToPng(path));
         using var source = new Bitmap(stream);
-        return new Bitmap(source);
+        var scale = Math.Min(1d, Math.Min((double)maximumWidth / source.Width, 4096d / source.Height));
+        return new Bitmap(source, new Size(Math.Max(1, (int)(source.Width * scale)), Math.Max(1, (int)(source.Height * scale))));
     }
 
     private void ShowPreview(ExpenseRow row)
@@ -407,7 +408,7 @@ public sealed class MainForm : Form
         try
         {
             using var preview = new Form { Text = string.IsNullOrEmpty(row.OriginalFilename) ? Path.GetFileName(row.ImagePath) : row.OriginalFilename, WindowState = FormWindowState.Maximized, BackColor = Color.FromArgb(25, 28, 34), FormBorderStyle = FormBorderStyle.None, KeyPreview = true, Cursor = Cursors.Hand };
-            using var image = LoadPreview(row.ImagePath);
+            using var image = LoadPreview(row.ImagePath, 2200);
             var picture = new PictureBox { Dock = DockStyle.Fill, Image = image, SizeMode = PictureBoxSizeMode.Zoom, Cursor = Cursors.Hand };
             picture.Click += (_, _) => preview.Close();
             preview.Click += (_, _) => preview.Close();
@@ -440,7 +441,6 @@ public sealed class MainForm : Form
         ui.Panel.Height = row.AmountCandidates.Count > 0 ? 255 : 205;
         ui.CandidateHint.Visible = row.AmountCandidates.Count > 0 && !row.Duplicate;
         ui.Candidates.Visible = ui.CandidateHint.Visible;
-        if (true)
         {
             foreach (Control old in ui.Candidates.Controls.Cast<Control>().ToArray()) old.Dispose();
             ui.Candidates.Controls.Clear();
@@ -480,7 +480,7 @@ public sealed class MainForm : Form
         _selected = id;
         var expense = _expenses.FirstOrDefault(row => row.Id == id);
         _preview.Image?.Dispose(); _preview.Image = null;
-        if (expense != null) { try { _preview.Image = LoadPreview(expense.ImagePath); _previewZoom = 1; ResizePreview(); _previewTitle.Text = (string.IsNullOrEmpty(expense.OriginalFilename) ? Path.GetFileName(expense.ImagePath) : expense.OriginalFilename) + "（点击放大）"; } catch { _previewTitle.Text = "截图无法读取"; } }
+        if (expense != null) { try { _preview.Image = LoadPreview(expense.ImagePath, 1200); _previewZoom = 1; ResizePreview(); _previewTitle.Text = (string.IsNullOrEmpty(expense.OriginalFilename) ? Path.GetFileName(expense.ImagePath) : expense.OriginalFilename) + "（点击放大）"; } catch { _previewTitle.Text = "截图无法读取"; } }
         foreach (var (rowId, ui) in _controls)
         {
             var color = rowId == id ? Color.FromArgb(219, 235, 255) : Color.White;

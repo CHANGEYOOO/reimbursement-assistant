@@ -64,6 +64,7 @@ jobs:
         run: |
           New-Item -ItemType Directory build/delivery -Force | Out-Null
           Copy-Item 'build/windows-installer/报销单助手-安装程序-1.27.exe' 'build/delivery/ReimbursementAssistant-Windows-1.27-Setup.exe'
+          Copy-Item 'Windows/使用与验收说明.md' 'build/delivery/使用与验收说明.md'
           $hash = (Get-FileHash 'build/delivery/ReimbursementAssistant-Windows-1.27-Setup.exe' -Algorithm SHA256).Hash.ToLower()
           Set-Content -Path 'build/delivery/SHA256.txt' -Value "$hash  ReimbursementAssistant-Windows-1.27-Setup.exe" -Encoding utf8
       - name: Require all rule checks
