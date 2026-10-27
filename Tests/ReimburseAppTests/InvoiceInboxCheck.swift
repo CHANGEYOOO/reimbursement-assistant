@@ -1,5 +1,6 @@
 #if DIRECT_TEST_RUNNER
 import Foundation
+import AppKit
 
 @main struct InvoiceInboxCheck {
     @MainActor static func main() async throws {
@@ -8,7 +9,7 @@ import Foundation
         let projects = root.appendingPathComponent("projects", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let local = root.appendingPathComponent("发票金额39.00.pdf")
-        try Data("invoice sample one".utf8).write(to: local)
+        try makePDF().write(to: local)
         let store = InvoiceInboxStore(directory: box, projectsDirectory: projects)
         let received = ISO8601DateFormatter().date(from: "2026-09-24T12:00:00Z")!
         await store.importFiles([local], receivedAt: received)
@@ -24,8 +25,7 @@ import Foundation
         let legacy = Invoice(id: UUID(), storedFilename: "old.pdf", originalFilename: "old.pdf", fingerprint: "old", amount: 10, warning: nil)
         try JSONEncoder().encode([legacy]).write(to: projectURL.appendingPathComponent("invoices.json"))
         let project = DraftSummary(id: projectID, title: "测试项目", updatedAt: Date(), url: projectURL)
-        do { try store.assign(ids: [id], to: project); preconditionFailure("Unknown attachment type must require confirmation") } catch {}
-        try store.confirmInvoice(id)
+        precondition(store.items[0].isAcceptedInvoice, "Ordinary invoice is accepted automatically")
         try store.assign(ids: [id], to: project)
         try store.assign(ids: [id], to: project)
         var assigned = try JSONDecoder().decode([Invoice].self, from: Data(contentsOf: projectURL.appendingPathComponent("invoices.json")))
@@ -62,9 +62,9 @@ import Foundation
         try store.registerRemote(message)
         try store.registerRemote(message)
         let pending = store.items.first { $0.mailID == "mail20" }!
-        precondition(store.items.count == 2 && pending.amount == 88 && !store.isDownloaded(pending), "Sync registers metadata without downloading or duplicating attachments")
+        precondition(store.items.count == 2 && pending.amount == 88 && !store.isDownloaded(pending) && !pending.isAcceptedInvoice, "Sync registers metadata without downloading or duplicating attachments")
         do { try store.assign(ids: [pending.id], to: project); preconditionFailure("Remote invoice must be downloaded before assignment") } catch {}
-        try Data("cached invoice body".utf8).write(to: store.sourceURL(for: pending))
+        try makePDF().write(to: store.sourceURL(for: pending))
         let recoveredIDs = try await store.download(pending.id)
         let recovered = store.items.first { $0.id == pending.id }!
         precondition(recoveredIDs == [pending.id] && !recovered.fingerprint.hasPrefix("remote:") && recovered.amount == 88,
@@ -72,6 +72,25 @@ import Foundation
         precondition(recovered.receivedAt == received)
         let reopened = InvoiceInboxStore(directory: box, projectsDirectory: projects)
         precondition(reopened.items.count == 2 && reopened.items.first(where: { $0.id == pending.id })?.receivedAt == received)
+        let rejectedFile = root.appendingPathComponent("发票报销单金额66.00.pdf")
+        try makePDF(title: "费用报销单").write(to: rejectedFile)
+        await store.importFiles([rejectedFile])
+        let rejected = store.items.first { $0.originalFilename == rejectedFile.lastPathComponent }!
+        precondition(!rejected.isAcceptedInvoice, "A filename amount cannot turn a report into an invoice")
+        try store.update(rejected.id, amount: "66", buyerTitle: "手动抬头")
+        do { try store.assign(ids: [rejected.id], to: project); preconditionFailure("Money edits cannot override document rejection") } catch {}
+        var oldSnapshot = try JSONSerialization.jsonObject(with: Data(contentsOf: boxMetadata)) as! [String: Any]
+        var oldItems = oldSnapshot["items"] as! [[String: Any]]
+        let rejectedIndex = oldItems.firstIndex { ($0["originalFilename"] as? String) == rejectedFile.lastPathComponent }!
+        oldItems[rejectedIndex]["documentKind"] = "invoice"
+        oldItems[rejectedIndex]["documentPolicyRevision"] = 1
+        oldItems[rejectedIndex]["documentConfirmed"] = true
+        oldSnapshot["items"] = oldItems
+        try JSONSerialization.data(withJSONObject: oldSnapshot).write(to: boxMetadata)
+        let migrated = InvoiceInboxStore(directory: box, projectsDirectory: projects)
+        precondition(!migrated.items.first { $0.id == rejected.id }!.isAcceptedInvoice)
+        await migrated.refreshMissingTitles()
+        precondition(!migrated.items.first { $0.id == rejected.id }!.isAcceptedInvoice, "Legacy manual type confirmations cannot bypass the current whitelist")
         let details = InvoiceInboxStore.invoiceDetails(in: "购买方信息\n名称：示例购买公司\n纳税人识别号：123\n销售方信息\n名称：示例销售公司\n*餐饮服务*餐费")
         precondition(details.buyer == "示例购买公司" && details.seller == "示例销售公司" && details.item.contains("餐费"))
         func unsafeArchive(name: String, attributes: UInt32 = 0) -> Data {
@@ -94,6 +113,23 @@ import Foundation
             do { _ = try InvoiceInboxStore.readArchive(archive); preconditionFailure("Unsafe ZIP paths and symlinks must be rejected before extraction") } catch {}
         }
         print("Invoice inbox persistence, metadata-only sync, deduplication, project assignment checks passed; temporary files retained at \(root.path)")
+    }
+    private static func makePDF(title: String = "增值税电子普通发票") -> Data {
+        let data = NSMutableData()
+        var bounds = CGRect(x: 0, y: 0, width: 600, height: 400)
+        let context = CGContext(consumer: CGDataConsumer(data: data)!, mediaBox: &bounds, nil)!
+        context.beginPDFPage(nil)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: false)
+        let font: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 12)]
+        ("\(title) 发票号码：12345678901234567890\n开票日期：2026年10月27日" as NSString).draw(at: CGPoint(x: 30, y: 360), withAttributes: font)
+        ("购买方信息\n名称：测试购买公司\n纳税人识别号：TEST" as NSString).draw(at: CGPoint(x: 30, y: 300), withAttributes: font)
+        ("销售方信息\n名称：测试销售公司\n纳税人识别号：SELLER" as NSString).draw(at: CGPoint(x: 320, y: 300), withAttributes: font)
+        ("价税合计 ¥39.00\n*餐饮服务*餐费" as NSString).draw(at: CGPoint(x: 30, y: 150), withAttributes: font)
+        NSGraphicsContext.restoreGraphicsState()
+        context.endPDFPage()
+        context.closePDF()
+        return data as Data
     }
 }
 #endif

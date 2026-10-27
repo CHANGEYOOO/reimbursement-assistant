@@ -13,6 +13,12 @@ public struct Invoice: Identifiable, Codable, Sendable {
     public let fingerprint: String
     public var amount: Decimal?
     public var warning: String?
+    public var documentKind: InvoiceDocumentKind? = nil
+    public var documentPolicyRevision: Int? = nil
+
+    public var isAccepted: Bool {
+        documentKind == .invoice && documentPolicyRevision == InvoiceDocumentClassifier.policyRevision
+    }
 }
 
 @MainActor public final class InvoiceStore: ObservableObject {
@@ -21,32 +27,34 @@ public struct Invoice: Identifiable, Codable, Sendable {
     @Published public private(set) var lastError: String?
 
     private var directory: URL?
-    private var editedIDs: Set<UUID> = []
 
     public init() {}
 
+    public var acceptedInvoices: [Invoice] { invoices.filter(\.isAccepted) }
+    public var excludedCount: Int { invoices.filter { !$0.isAccepted && !pendingIDs.contains($0.id) }.count }
+
     public var total: Decimal {
-        invoices.filter { !needsConfirmation($0) }.reduce(Decimal.zero) { $0 + ($1.amount ?? .zero) }
+        acceptedInvoices.filter { !needsConfirmation($0) }.reduce(Decimal.zero) { $0 + ($1.amount ?? .zero) }
     }
 
     public var confirmationCount: Int {
-        invoices.filter(needsConfirmation).count
+        acceptedInvoices.filter(needsConfirmation).count + pendingIDs.count
     }
 
     public func needsConfirmation(_ invoice: Invoice) -> Bool {
-        pendingIDs.contains(invoice.id) || (invoice.amount ?? .zero) <= 0 || invoice.warning != nil
+        !invoice.isAccepted || pendingIDs.contains(invoice.id) || (invoice.amount ?? .zero) <= 0 || invoice.warning != nil
     }
 
     public func configure(directory: URL) {
         self.directory = directory
         pendingIDs.removeAll()
-        editedIDs.removeAll()
         lastError = nil
         do {
             try FileManager.default.createDirectory(at: filesDirectory, withIntermediateDirectories: true)
             let metadata = directory.appendingPathComponent("invoices.json")
             invoices = FileManager.default.fileExists(atPath: metadata.path)
                 ? try JSONDecoder().decode([Invoice].self, from: Data(contentsOf: metadata)) : []
+            validateLegacyInvoices()
         } catch {
             invoices = []
             self.directory = nil
@@ -61,6 +69,7 @@ public struct Invoice: Identifiable, Codable, Sendable {
         let stored = try JSONDecoder().decode([Invoice].self, from: Data(contentsOf: metadata))
         let existing = Set(invoices.map(\.id))
         invoices += stored.filter { !existing.contains($0.id) }
+        validateLegacyInvoices()
     }
 
     public func sourceURL(for invoice: Invoice) -> URL {
@@ -79,47 +88,62 @@ public struct Invoice: Identifiable, Codable, Sendable {
 
     private func importFile(_ url: URL) async {
         let currentDirectory = directory
+        let id = UUID()
+        pendingIDs.insert(id)
+        defer { pendingIDs.remove(id) }
         do {
-            let data = try await Task.detached(priority: .userInitiated) { try Data(contentsOf: url) }.value
-            guard directory == currentDirectory else { return }
-            let hash = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
-            guard !invoices.contains(where: { $0.fingerprint == hash }) else {
-                lastError = "已跳过重复发票：\(url.lastPathComponent)"
-                return
-            }
             guard Self.isSupported(url) else {
                 lastError = "不支持的发票格式：\(url.lastPathComponent)"
                 return
             }
-            let id = UUID()
-            let filename = id.uuidString + "." + url.pathExtension.lowercased()
-            let destination = filesDirectory.appendingPathComponent(filename)
-            try data.write(to: destination, options: .atomic)
-            let namedAmount = Self.amountInFilename(url.deletingPathExtension().lastPathComponent)
-            let invoice = Invoice(id: id, storedFilename: filename,
-                                  originalFilename: url.lastPathComponent, fingerprint: hash,
-                                  amount: namedAmount, warning: namedAmount == nil ? "正在识别价税合计…" : nil)
-            invoices.append(invoice)
-            try save()
-            guard namedAmount == nil else { return }
-            pendingIDs.insert(id)
-            do {
-                let amount = try await Task.detached(priority: .userInitiated) {
-                    try Self.recognizeTotal(at: destination)
-                }.value
-                guard directory == currentDirectory,
-                      let index = invoices.firstIndex(where: { $0.id == id }) else { return }
-                if !editedIDs.contains(id) { invoices[index].amount = amount }
-                invoices[index].warning = amount == nil ? "未识别到价税合计，请手动填写。" : nil
-            } catch {
-                if let index = invoices.firstIndex(where: { $0.id == id }) {
-                    invoices[index].warning = "识别失败，请手动填写。"
-                }
+            let result = try await Task.detached(priority: .userInitiated) {
+                let data = try Data(contentsOf: url)
+                let text = try Self.invoiceText(at: url)
+                let classification = InvoiceDocumentClassifier.classify(at: url, text: text, filename: url.lastPathComponent)
+                let amount = classification.kind == .invoice
+                    ? Self.amountInFilename(url.deletingPathExtension().lastPathComponent)
+                        ?? (try? InvoiceAmountRecognition.total(at: url, text: text)) : nil
+                return (data, classification.kind, classification.reason, amount)
+            }.value
+            guard directory == currentDirectory else { return }
+            guard result.1 == .invoice else {
+                lastError = "已排除：\(url.lastPathComponent)。\(result.2)"
+                return
             }
-            pendingIDs.remove(id)
+            let hash = SHA256.hash(data: result.0).map { String(format: "%02x", $0) }.joined()
+            guard !invoices.contains(where: { $0.fingerprint == hash }) else {
+                lastError = "已跳过重复发票：\(url.lastPathComponent)"
+                return
+            }
+            let filename = id.uuidString + "." + url.pathExtension.lowercased()
+            try result.0.write(to: filesDirectory.appendingPathComponent(filename), options: .atomic)
+            invoices.append(Invoice(id: id, storedFilename: filename,
+                                    originalFilename: url.lastPathComponent, fingerprint: hash,
+                                    amount: result.3, warning: result.3 == nil ? "未识别到价税合计，请手动填写。" : nil,
+                                    documentKind: .invoice, documentPolicyRevision: InvoiceDocumentClassifier.policyRevision))
             try save()
         } catch {
             lastError = "导入发票失败：\(error.localizedDescription)"
+        }
+    }
+
+    private func validateLegacyInvoices() {
+        guard let currentDirectory = directory else { return }
+        for invoice in invoices where invoice.documentPolicyRevision != InvoiceDocumentClassifier.policyRevision && !pendingIDs.contains(invoice.id) {
+            pendingIDs.insert(invoice.id)
+            let source = sourceURL(for: invoice)
+            Task {
+                let kind = await Task.detached(priority: .utility) {
+                    guard let text = try? Self.invoiceText(at: source) else { return InvoiceDocumentKind.nonInvoice }
+                    return InvoiceDocumentClassifier.classify(at: source, text: text, filename: invoice.originalFilename).kind
+                }.value
+                guard directory == currentDirectory,
+                      let index = invoices.firstIndex(where: { $0.id == invoice.id }) else { return }
+                invoices[index].documentKind = kind == .invoice ? .invoice : .nonInvoice
+                invoices[index].documentPolicyRevision = InvoiceDocumentClassifier.policyRevision
+                pendingIDs.remove(invoice.id)
+                do { try save() } catch { lastError = "保存发票识别结果失败：\(error.localizedDescription)" }
+            }
         }
     }
 
@@ -164,7 +188,6 @@ public struct Invoice: Identifiable, Codable, Sendable {
         let input = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let amount = input.range(of: #"^[0-9]+(?:\.[0-9]{1,2})?$"#, options: .regularExpression) == nil
             ? nil : Decimal(string: input, locale: Locale(identifier: "en_US_POSIX"))
-        editedIDs.insert(id)
         invoices[index].amount = amount
         invoices[index].warning = (amount ?? .zero) <= 0 ? "请填写大于 0 的发票金额。" : nil
         do { try save() } catch { lastError = "保存发票金额失败：\(error.localizedDescription)" }
@@ -186,14 +209,13 @@ public struct Invoice: Identifiable, Codable, Sendable {
         }
         invoices.remove(at: index)
         pendingIDs.remove(id)
-        editedIDs.remove(id)
         try save()
     }
 
     public func exportFolder(to parent: URL, date: Date = Date()) async throws -> URL {
         guard pendingIDs.isEmpty else { throw NSError(domain: "InvoiceStore", code: 2, userInfo: [NSLocalizedDescriptionKey: "请等待发票识别完成。"]) }
         guard let directory else { throw CocoaError(.fileNoSuchFile) }
-        let selected = invoices
+        let selected = acceptedInvoices
         guard !selected.isEmpty else { throw NSError(domain: "InvoiceStore", code: 4, userInfo: [NSLocalizedDescriptionKey: "请先导入发票。"]) }
         for invoice in selected {
             guard !needsConfirmation(invoice) else {

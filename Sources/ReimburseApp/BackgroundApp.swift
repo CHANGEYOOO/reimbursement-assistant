@@ -161,7 +161,7 @@ struct BackgroundStatusMenu: View {
         else if let date = mailbox.lastSyncAt {
             Text("上次同步：\(date.formatted(date: .omitted, time: .shortened))")
         } else { Text("尚未完成邮箱同步") }
-        Text("未分配发票：\(inbox.items.filter { $0.projectID == nil && $0.documentKind != .nonInvoice }.count) 张")
+        Text("未分配发票：\(inbox.items.filter { $0.projectID == nil && $0.isAcceptedInvoice }.count) 张")
         Text("\(mailbox.status.prefix(40))\(mailbox.status.count > 40 ? "…" : "")").help(mailbox.status)
         Divider()
         Button("打开报销单助手") {

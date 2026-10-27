@@ -98,7 +98,7 @@ public struct ReviewView: View {
                 HStack {
                     Label("发票箱", systemImage: "tray.full")
                     Spacer()
-                    Text("\(inbox.items.filter { $0.projectID == nil && $0.documentKind != .nonInvoice }.count)").foregroundStyle(.secondary)
+                    Text("\(inbox.items.filter { $0.projectID == nil && $0.isAcceptedInvoice }.count)").foregroundStyle(.secondary)
                 }.padding(8)
                     .background(controls.showingInbox ? Color.accentColor.opacity(0.15) : .clear, in: RoundedRectangle(cornerRadius: 6))
             }.buttonStyle(.plain)
@@ -176,7 +176,7 @@ public struct ReviewView: View {
                         Button("从发票箱选择") { openInbox(target: controls.draft) }
                         Spacer()
                         Button(controls.exportingInvoices ? "正在导出…" : "导出发票文件夹") { exportInvoices() }
-                            .disabled(invoices.invoices.isEmpty || controls.exportingInvoices || invoices.confirmationCount > 0)
+                            .disabled(invoices.acceptedInvoices.isEmpty || controls.exportingInvoices || invoices.confirmationCount > 0)
                     } else {
                         Button("导入截图") { chooseImages() }
                         Spacer()
@@ -311,7 +311,7 @@ public struct ReviewView: View {
 
                 HStack {
                     if controls.showingInvoices {
-                        Text("已导入发票 \(invoices.invoices.count) 张 · 原格式独立导出")
+                        Text("已导入发票 \(invoices.acceptedInvoices.count) 张 · 已排除附件 \(invoices.excludedCount) 份 · 原格式独立导出")
                             .font(.caption).foregroundStyle(.secondary)
                     } else {
                         Text("已导入 \(store.expenses.count) 张 · 有效 \(store.exportExpenses.count) 笔 · 待处理 \(store.reviewCount) 笔 · 已填订单总额 ¥\(currency(store.total))")
@@ -435,7 +435,7 @@ public struct ReviewView: View {
     private var invoiceList: some View {
         ScrollView {
             LazyVStack(spacing: 8) {
-                ForEach(invoices.invoices) { invoice in
+                ForEach(invoices.acceptedInvoices) { invoice in
                     InvoiceRow(invoice: invoice, store: invoices,
                                preview: { url in
                                    if url.pathExtension.lowercased() == "pdf" { NSWorkspace.shared.open(url) }

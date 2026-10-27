@@ -18,11 +18,9 @@ import UniformTypeIdentifiers
     @Published var error: String?
     @Published var busy = false
     @Published var dropTarget = false
-    @Published var documentFilter = "发票与待确认"
+    @Published var documentFilter = "发票"
     @Published var deleteIDs: Set<UUID> = []
     @Published var confirmingDelete = false
-    @Published var confirmInvoiceID: UUID?
-    @Published var confirmingDocument = false
 }
 
 struct InvoiceInboxView: View {
@@ -37,14 +35,14 @@ struct InvoiceInboxView: View {
 
     private var filtered: [InboxInvoice] {
         inbox.items.filter { item in
-            (controls.documentFilter == "全部附件" || (controls.documentFilter == "已排除附件" ? item.documentKind == .nonInvoice : item.documentKind != .nonInvoice)) &&
+            (controls.documentFilter == "发票" ? item.isAcceptedInvoice : controls.documentFilter == "待下载附件" ? !inbox.isDownloaded(item) && !item.isAcceptedInvoice && item.documentKind != .nonInvoice : inbox.isDownloaded(item) && !item.isAcceptedInvoice || item.documentKind == .nonInvoice) &&
             (controls.buyer == "全部抬头" || (controls.buyer == "抬头未知" ? item.buyerTitle.isEmpty : item.buyerTitle == controls.buyer)) &&
             (controls.assignment == "全部状态" || (controls.assignment == "未分配" ? item.projectID == nil : item.projectID != nil)) &&
             (!controls.dateFilter || InvoiceInboxDates.contains(item.receivedAt, from: controls.start, through: controls.end))
         }.sorted { $0.receivedAt > $1.receivedAt }
     }
     private var selectable: Set<UUID> { Set(filtered.filter { !inbox.pendingIDs.contains($0.id) }.map(\.id)) }
-    private var chosen: Set<UUID> { controls.selected.intersection(selectable).intersection(Set(inbox.items.filter { $0.projectID == nil && $0.documentKind != .nonInvoice }.map(\.id))) }
+    private var chosen: Set<UUID> { controls.selected.intersection(selectable).intersection(Set(inbox.items.filter { $0.projectID == nil && $0.isAcceptedInvoice }.map(\.id))) }
     private var monthGroups: [Date] { InvoiceInboxDates.months(filtered.map(\.receivedAt)) }
     private var joiningTitle: String {
         let downloads = inbox.items.contains { chosen.contains($0.id) && !inbox.isDownloaded($0) }
@@ -62,6 +60,8 @@ struct InvoiceInboxView: View {
             }
             if !syncStatus.isEmpty { Text(syncStatus).font(.caption).foregroundStyle(.secondary) }
             filters
+            Text("只收录通过自动检查的电子普通发票；邮箱新附件请在“待下载附件”中按需下载识别。")
+                .font(.caption).foregroundStyle(.secondary)
             HStack {
                 Toggle("全选当前结果", isOn: Binding(get: { !selectable.isEmpty && selectable.isSubset(of: controls.selected) }, set: {
                     if $0 { controls.selected.formUnion(selectable) } else { controls.selected.subtract(selectable) }
@@ -109,15 +109,6 @@ struct InvoiceInboxView: View {
             }
             Button("取消", role: .cancel) {}
         } message: { Text("仅删除发票箱记录和本地缓存，不影响项目副本、已导出文件或邮箱原件。") }
-        .confirmationDialog("确认此附件是发票？", isPresented: $controls.confirmingDocument, titleVisibility: .visible) {
-            Button("确认为发票") {
-                if let id = controls.confirmInvoiceID {
-                    do { try inbox.confirmInvoice(id) } catch { controls.error = error.localizedDescription }
-                }
-                controls.confirmInvoiceID = nil
-            }
-            Button("取消", role: .cancel) { controls.confirmInvoiceID = nil }
-        } message: { Text("请先预览并核对附件内容；文件类型确认不代表税务验真。") }
         .alert("操作失败", isPresented: Binding(get: { controls.error != nil }, set: { if !$0 { controls.error = nil } })) {
             Button("确定") { controls.error = nil }
         } message: { Text(controls.error ?? "") }
@@ -127,7 +118,7 @@ struct InvoiceInboxView: View {
         VStack(alignment: .leading) {
             HStack {
                 Picker("附件类型", selection: $controls.documentFilter) {
-                    ForEach(["发票与待确认", "已排除附件", "全部附件"], id: \.self) { Text($0).tag($0) }
+                    ForEach(["发票", "待下载附件", "已排除附件"], id: \.self) { Text($0).tag($0) }
                 }.frame(width: 220)
                 Picker("购买方抬头", selection: $controls.buyer) {
                     Text("全部抬头").tag("全部抬头")
@@ -167,9 +158,9 @@ struct InvoiceInboxView: View {
                 Text(item.amount.map { "¥" + $0.formatted(.number.precision(.fractionLength(2))) } ?? (downloaded ? "金额待填写" : "下载后识别金额"))
                     .font(.title3.weight(.semibold)).monospacedDigit()
             }
-            Text(item.documentKind == .invoice ? "发票" : item.documentKind == .nonInvoice ? "已排除：非发票附件" : "待确认附件类型")
-                .font(.caption).foregroundStyle(item.documentKind == .invoice ? Color.secondary : Color.orange)
-            if let reason = item.documentReason, item.documentKind != .invoice { Text(reason).font(.caption).foregroundStyle(.secondary) }
+            Text(item.isAcceptedInvoice ? "电子普通发票" : !downloaded && item.documentKind != .nonInvoice ? "待下载自动识别" : "已排除：未通过发票检查")
+                .font(.caption).foregroundStyle(item.isAcceptedInvoice ? Color.secondary : Color.orange)
+            if let reason = item.documentReason, !item.isAcceptedInvoice { Text(reason).font(.caption).foregroundStyle(.secondary) }
             Text("购买方：" + (item.buyerTitle.isEmpty ? (downloaded ? "抬头未知" : "下载后识别抬头") : item.buyerTitle))
             if !item.itemDescription.isEmpty { Text("内容：" + item.itemDescription).lineLimit(2) }
             HStack {
@@ -184,16 +175,13 @@ struct InvoiceInboxView: View {
                 Spacer()
                 if !downloaded { Button("下载") { download(item) }.disabled(pending || controls.busy) }
                 Button(downloaded ? "预览" : "下载并预览") { preview(item) }.disabled(pending || controls.busy)
-                if downloaded && item.documentKind != .invoice {
-                    Button("确认为发票") { controls.confirmInvoiceID = item.id; controls.confirmingDocument = true }.disabled(pending || controls.busy)
-                }
                 Button("删除", role: .destructive) { controls.deleteIDs = [item.id]; controls.confirmingDelete = true }
                     .disabled(pending || controls.busy)
                 Button("修改金额与抬头") {
                     controls.amount = item.amount.map { NSDecimalNumber(decimal: $0).stringValue } ?? ""
                     controls.title = item.buyerTitle
                     controls.edit = item
-                }.disabled(item.projectID != nil || pending || controls.busy)
+                }.disabled(!item.isAcceptedInvoice || item.projectID != nil || pending || controls.busy)
             }
         }
         .font(.callout).padding(16)

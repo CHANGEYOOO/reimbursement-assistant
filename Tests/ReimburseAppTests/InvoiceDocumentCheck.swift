@@ -1,13 +1,15 @@
 #if DIRECT_TEST_RUNNER
 import Foundation
+import PDFKit
+import AppKit
 
 @main struct InvoiceDocumentCheck {
     static func main() {
         precondition(!InvoiceDocumentClassifier.shouldList(filename: "滴滴行程单.pdf", subject: "电子发票已开具"))
         precondition(!InvoiceDocumentClassifier.shouldList(filename: "发票报销单.pdf", subject: "发票"))
         precondition(!InvoiceDocumentClassifier.shouldList(filename: "发票清单.pdf", subject: "发票"))
-        precondition(InvoiceDocumentClassifier.shouldList(filename: "电子发票（航空运输电子客票行程单）.pdf", subject: ""))
-        precondition(InvoiceDocumentClassifier.shouldList(filename: "航空运输电子客票行程单.pdf", subject: ""))
+        precondition(!InvoiceDocumentClassifier.shouldList(filename: "电子发票（航空运输电子客票行程单）.pdf", subject: ""))
+        precondition(!InvoiceDocumentClassifier.shouldList(filename: "航空运输电子客票行程单.pdf", subject: ""))
         precondition(InvoiceDocumentClassifier.shouldList(filename: "发票及行程单.zip", subject: ""))
         precondition(InvoiceDocumentClassifier.shouldList(filename: "7C55D9E1.pdf", subject: "您的电子发票"))
         precondition(!InvoiceDocumentClassifier.shouldList(filename: "7C55D9E1.pdf", subject: "会议材料"))
@@ -20,11 +22,32 @@ import Foundation
         let report = "费用报销单\n电子发票报销明细\n发票号码 开票日期 购买方 销售方 价税合计\n12345678 2026-10-27 合计127.46"
         precondition(InvoiceDocumentClassifier.classify(text: report, filename: "发票.pdf").kind == .nonInvoice)
         let flight = "电子发票（航空运输电子客票行程单）\n发票号码：12345678901234567890\n开票日期：2026年10月27日\n购买方名称\n销售方名称\n价税合计127.46"
-        precondition(InvoiceDocumentClassifier.classify(text: flight, filename: "电子行程单.pdf").kind == .invoice)
+        precondition(InvoiceDocumentClassifier.classify(text: flight, filename: "电子行程单.pdf").kind == .nonInvoice)
         let rail = "电子发票（铁路电子客票）\n发票号码：12345678901234567890\n开票日期：2026年10月27日\n购买方名称\n价税合计127.46"
-        precondition(InvoiceDocumentClassifier.classify(text: rail, filename: "车票.pdf").kind == .invoice)
+        precondition(InvoiceDocumentClassifier.classify(text: rail, filename: "车票.pdf").kind == .nonInvoice)
         precondition(InvoiceDocumentClassifier.classify(text: "普通PDF附件\n127.46", filename: "电子发票.pdf").kind == .unknown)
         precondition(InvoiceDocumentClassifier.classify(text: "", filename: "未知.pdf").kind == .unknown)
+        precondition(InvoiceDocumentClassifier.classify(text: invoice.replacingOccurrences(of: "普通发票", with: "专用发票"), filename: "发票.pdf").kind != .invoice)
+        precondition(InvoiceDocumentClassifier.classify(text: invoice.replacingOccurrences(of: "销售方信息", with: ""), filename: "发票.pdf").kind != .invoice)
+        precondition(InvoiceDocumentClassifier.classify(text: invoice.replacingOccurrences(of: "电子发票（普通发票）", with: "增值税电子普通发票"), filename: "发票.pdf").kind == .invoice)
+        if CommandLine.arguments.count > 1 {
+            let url = URL(fileURLWithPath: CommandLine.arguments[1])
+            let text = PDFDocument(url: url)?.string ?? ""
+            precondition(InvoiceDocumentClassifier.classify(at: url, text: text, filename: url.lastPathComponent).kind == .invoice, "User ordinary invoice must be accepted")
+            let mixed = PDFDocument()
+            mixed.insert(PDFDocument(url: url)!.page(at: 0)!, at: 0)
+            let image = NSImage(size: NSSize(width: 600, height: 800))
+            image.lockFocus()
+            NSColor.white.setFill()
+            NSRect(x: 0, y: 0, width: 600, height: 800).fill()
+            ("费用报销单" as NSString).draw(at: NSPoint(x: 40, y: 700), withAttributes: [.font: NSFont.systemFont(ofSize: 28)])
+            image.unlockFocus()
+            mixed.insert(PDFPage(image: image)!, at: 1)
+            let fixture = FileManager.default.temporaryDirectory.appendingPathComponent("mixed-invoice-\(UUID().uuidString).pdf")
+            precondition(mixed.write(to: fixture))
+            precondition(InvoiceDocumentClassifier.classify(at: fixture, text: mixed.string ?? "", filename: "发票.pdf").kind != .invoice, "A valid first page must not admit a supporting-document second page")
+            print("User invoice passed ordinary-invoice whitelist; mixed PDF rejected")
+        }
         let red = invoice.replacingOccurrences(of: "127.46", with: "-127.46")
         precondition(InvoiceDocumentClassifier.classify(text: red, filename: "红字发票.pdf").kind == .invoice)
         precondition(InvoiceDocumentClassifier.classify(text: "电子发票说明书\n开票日期和发票号码填写说明", filename: "发票说明.pdf").kind != .invoice)
