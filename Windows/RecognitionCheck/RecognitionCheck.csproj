@@ -12,5 +12,6 @@
     <Compile Include="../ReimburseApp/SemanticClassifier.cs" Link="SemanticClassifier.cs" />
     <Compile Include="../ReimburseApp/ExpenseRow.cs" Link="ExpenseRow.cs" />
     <None Include="../Fixtures/OrderRecognitionParity.json" Link="OrderRecognitionParity.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="../Fixtures/PositionRecognitionParity.json" Link="PositionRecognitionParity.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

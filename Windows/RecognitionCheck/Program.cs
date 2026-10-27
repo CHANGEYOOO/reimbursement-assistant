@@ -21,6 +21,21 @@ using (var fixtures = JsonDocument.Parse(File.ReadAllText(fixturePath)))
     Console.WriteLine($"Mac/Windows same-text parity passed ({fixtures.RootElement.GetArrayLength()} fixtures)");
 }
 
+using (var fixtures = JsonDocument.Parse(File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "PositionRecognitionParity.json"))))
+{
+    foreach (var fixture in fixtures.RootElement.EnumerateArray())
+    {
+        var lines = fixture.GetProperty("lines").EnumerateArray().Select(line => new PositionedText(line.GetProperty("text").GetString()!, line.GetProperty("x").GetDouble(), line.GetProperty("y").GetDouble())).ToArray();
+        var result = Recognition.PositionedAmount(lines);
+        var amount = fixture.TryGetProperty("amount", out var money) ? decimal.Parse(money.GetString()!, CultureInfo.InvariantCulture) : (decimal?)null;
+        var warning = fixture.TryGetProperty("warning", out var note) ? note.GetString() : null;
+        var candidates = fixture.GetProperty("candidates").EnumerateArray().Select(value => decimal.Parse(value.GetString()!, CultureInfo.InvariantCulture));
+        if (result?.Amount != amount || result?.Warning != warning || !Recognition.Candidates(lines).Select(candidate => candidate.Amount).SequenceEqual(candidates))
+            throw new InvalidOperationException("Mac/Windows positioned/candidate mismatch: " + fixture.GetProperty("name").GetString());
+    }
+    Console.WriteLine($"Mac/Windows layout and candidate parity passed ({fixtures.RootElement.GetArrayLength()} fixtures)");
+}
+
 byte[] Response(string content) => JsonSerializer.SerializeToUtf8Bytes(new { choices = new[] { new { finish_reason = "stop", message = new { content } } } });
 SemanticClassification Decode(string source, string payment = "null", string date = "null") => SemanticClassifier.DecodeResponse(Response("{\"category\":\"餐食\",\"certainty\":\"high\",\"reason\":\"商品是可食用食品\",\"payment\":" + payment + ",\"transaction_date\":" + date + "}"), source, new DateTime(2026, 10, 27));
 void Check(bool condition, string message) { if (!condition) throw new InvalidOperationException(message); }
@@ -53,6 +68,16 @@ var unresolved = new ExpenseRow { RecognizedText = "汉堡\n商家合计20.00", 
 Check(SemanticClassifier.NeedsAssistance(unresolved), "Unconfirmed total-only amount must receive automatic assistance");
 unresolved.Edited.Add("amount");
 Check(!SemanticClassifier.NeedsAssistance(unresolved), "Manual money edit must prevent automatic overwrite");
+var model = new ExpenseRow { Amount = 1, Category = "餐食", Purpose = "餐食费用", Date = "0001-01-01" };
+Check(model.Issues.Count > 0, "Manual date must respect Mac minimum year1900");
+model.Date = "2100-01-01";
+Check(model.Issues.Count > 0, "Manual date must respect Mac maximum year2099");
+model.Date = "2026-10-27"; model.Confirmed = true; model.Amount = null;
+Check(model.Issues.Count > 0, "Manual confirmation cannot bypass missing required amount");
+model.Amount = 1; model.Date = "";
+Check(model.Issues.Count > 0, "Manual confirmation cannot bypass missing required date");
+model.Date = "2026-10-27"; model.Purpose = "";
+Check(model.Issues.Count > 0, "Manual confirmation cannot bypass missing required purpose");
 Console.WriteLine("AI evidence, current-year dates, refund guards, manual-edit gates and endpoint checks passed (offline)");
 if (args.Length > 1)
 {

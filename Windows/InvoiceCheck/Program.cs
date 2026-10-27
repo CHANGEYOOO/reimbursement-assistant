@@ -1,6 +1,7 @@
 using ReimburseApp;
 using UglyToad.PdfPig;
 using UglyToad.PdfPig.Core;
+using UglyToad.PdfPig.Content;
 using UglyToad.PdfPig.Writer;
 using UglyToad.PdfPig.Fonts.Standard14Fonts;
 

@@ -10,9 +10,9 @@ internal static class Program
     private static void Main()
     {
         ApplicationConfiguration.Initialize();
-        var appDirectory = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "报销单助手", "ocr-5.2.0");
+        var selfCheck = Environment.GetCommandLineArgs().Contains("--self-check");
+        if (selfCheck) AppPaths.UseTestRoot(Path.Combine(Path.GetTempPath(), "reimburse-windows-check-" + Guid.NewGuid()));
+        var appDirectory = Path.Combine(AppPaths.Root, "ocr-5.2.0");
         var dataDirectory = Path.Combine(appDirectory, "tessdata");
         Directory.CreateDirectory(dataDirectory);
         var nativeDirectory = Path.Combine(appDirectory, "x64");
@@ -25,7 +25,14 @@ internal static class Program
             Extract($"ReimburseApp.tessdata.{language}.traineddata", destination);
         }
         TesseractEnviornment.CustomSearchPath = appDirectory;
-        Application.Run(new MainForm(dataDirectory));
+        if (selfCheck)
+        {
+            try { using var form = new MainForm(dataDirectory); form.SelfCheck(); File.WriteAllText("build/windows-smoke.log", "Windows startup, native OCR, autosave, manual amount and Excel checks passed"); }
+            catch (Exception ex) { File.WriteAllText("build/windows-smoke.log", ex.ToString()); Environment.ExitCode = 1; }
+            return;
+        }
+        try { Application.Run(new MainForm(dataDirectory)); }
+        catch (Exception ex) { MessageBox.Show("启动失败，资料已保留：" + ex.Message, "报销单助手", MessageBoxButtons.OK, MessageBoxIcon.Error); }
     }
 
     private static void Extract(string resourceName, string destination)

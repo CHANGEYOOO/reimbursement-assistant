@@ -18,10 +18,16 @@ jobs:
         with:
           python-version: '3.12'
       - name: Order rules and AI evidence checks
+        id: orders
+        continue-on-error: true
         run: dotnet run --project Windows/RecognitionCheck -c Release
       - name: Invoice whitelist and queue checks
+        id: invoices
+        continue-on-error: true
         run: dotnet run --project Windows/InvoiceCheck -c Release
       - name: Mail and settings boundary checks
+        id: settings
+        continue-on-error: true
         run: dotnet run --project Windows/MailSettingsCheck -c Release
       - name: Publish self-contained app
         run: dotnet publish Windows/ReimburseApp -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o build/windows-app
@@ -31,6 +37,12 @@ jobs:
           Invoke-WebRequest https://aka.ms/vs/17/release/vc_redist.x64.exe -OutFile build/vc_redist.x64.exe
           $signature = Get-AuthenticodeSignature build/vc_redist.x64.exe
           if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'Microsoft Corporation') { throw 'Microsoft runtime signature verification failed' }
+      - name: Windows startup and native OCR smoke check
+        shell: pwsh
+        run: |
+          $process = Start-Process -FilePath 'build/windows-app/报销单助手.exe' -ArgumentList '--self-check' -Wait -PassThru
+          Get-Content 'build/windows-smoke.log'
+          if ($process.ExitCode -ne 0) { throw 'Windows startup check failed' }
       - name: Package installer payload
         run: python scripts/package-windows-installer.py --payload-dir build/windows-app --runtime build/vc_redist.x64.exe --output build/windows-payload.zip
       - name: Publish installer
@@ -42,6 +54,9 @@ jobs:
           Copy-Item 'build/windows-installer/报销单助手-安装程序-1.27.exe' 'build/delivery/ReimbursementAssistant-Windows-1.27-Setup.exe'
           $hash = (Get-FileHash 'build/delivery/ReimbursementAssistant-Windows-1.27-Setup.exe' -Algorithm SHA256).Hash.ToLower()
           Set-Content -Path 'build/delivery/SHA256.txt' -Value "$hash  ReimbursementAssistant-Windows-1.27-Setup.exe" -Encoding utf8
+      - name: Require all rule checks
+        if: steps.orders.outcome != 'success' || steps.invoices.outcome != 'success' || steps.settings.outcome != 'success'
+        run: throw 'One or more rule checks failed; installer is not deliverable'
       - uses: actions/upload-artifact@v4
         with:
           name: ReimbursementAssistant-Windows-1.27

@@ -31,7 +31,7 @@ public sealed class ExpenseRow
             var issues = new List<string>();
             if (Pending) issues.Add("正在识别，请等待完成");
             if (Amount is not > 0) issues.Add("请填写正数金额");
-            if (!DateOnly.TryParseExact(Date, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out _)) issues.Add("请填写有效日期（年-月-日）");
+            if (!Recognition.IsValidDate(Date)) issues.Add("请填写有效日期（年-月-日）");
             if (string.IsNullOrWhiteSpace(Purpose)) issues.Add("请填写用途");
             if (Warning != null && !Confirmed && !Pending) issues.Add(Warning + "；请人工核对");
             return issues;

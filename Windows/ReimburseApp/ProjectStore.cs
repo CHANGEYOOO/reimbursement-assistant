@@ -5,7 +5,8 @@ namespace ReimburseApp;
 
 public static class AppPaths
 {
-    public static string Root { get; } = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "报销单助手");
+    public static string Root { get; private set; } = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "报销单助手");
+    internal static void UseTestRoot(string path) => Root = path;
     public static string Projects => Path.Combine(Root, "Projects");
     public static string Invoices => Path.Combine(Root, "InvoiceInbox");
 }

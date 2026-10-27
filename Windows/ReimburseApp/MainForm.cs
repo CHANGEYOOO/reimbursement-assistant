@@ -18,7 +18,9 @@ public sealed class MainForm : Form
     private readonly ListBox _projects = new() { Dock = DockStyle.Fill, IntegralHeight = false };
     private readonly Panel _host = new() { Dock = DockStyle.Fill };
     private readonly SplitContainer _orderSplit = new() { Dock = DockStyle.Fill, FixedPanel = FixedPanel.Panel2 };
-    private readonly PictureBox _preview = new() { Dock = DockStyle.Fill, SizeMode = PictureBoxSizeMode.Zoom, Cursor = Cursors.Hand };
+    private readonly PictureBox _preview = new() { SizeMode = PictureBoxSizeMode.StretchImage, Cursor = Cursors.Hand };
+    private readonly Panel _previewScroll = new() { Dock = DockStyle.Fill, AutoScroll = true };
+    private double _previewZoom = 1;
     private readonly Label _previewTitle = new() { Dock = DockStyle.Top, AutoSize = true, Padding = new Padding(8), Text = "点击一笔订单查看截图" };
     private readonly TextBox _search = new() { Width = 145, PlaceholderText = "搜索已填写金额" };
     private readonly CheckBox _onlyProblems = new() { Text = "只看待处理", AutoSize = true };
@@ -30,6 +32,7 @@ public sealed class MainForm : Form
     private readonly InvoiceWorkspace _invoiceWorkspace;
     private readonly BackgroundService _background;
     private bool _exitRequested;
+    private bool _selfCheck;
     private bool _loadingProject;
     private bool _dirty;
     private readonly HashSet<Guid> _recognizing = [];
@@ -85,8 +88,18 @@ public sealed class MainForm : Form
         _host.Controls.Add(_orderSplit);
         _host.Controls.Add(_invoiceWorkspace);
         var previewBox = new Panel { Dock = DockStyle.Fill, Padding = new Padding(8), BackColor = Color.FromArgb(246, 248, 250) };
-        previewBox.Controls.Add(_preview);
+        _previewScroll.Controls.Add(_preview);
+        previewBox.Controls.Add(_previewScroll);
+        var zoomTools = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 34 };
+        foreach (var (text, change) in new[] { ("−", -0.5), ("适合宽度", 0.0), ("+", 0.5) })
+        {
+            var button = new Button { Text = text, AutoSize = true };
+            button.Click += (_, _) => { _previewZoom = change == 0 ? 1 : Math.Clamp(_previewZoom + change, 0.5, 3); ResizePreview(); };
+            zoomTools.Controls.Add(button);
+        }
+        previewBox.Controls.Add(zoomTools);
         previewBox.Controls.Add(_previewTitle);
+        _previewScroll.Resize += (_, _) => ResizePreview();
         _orderSplit.Panel2.Controls.Add(previewBox);
         _preview.Click += (_, _) => { if (_expenses.FirstOrDefault(row => row.Id == _selected) is { } row) ShowPreview(row); };
 
@@ -95,7 +108,7 @@ public sealed class MainForm : Form
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 48));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 60));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 84));
         _orderSplit.Panel1.Controls.Add(root);
         var toolbar = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false };
         toolbar.Controls.Add(new Label { Text = "报销单标题", AutoSize = true, Margin = new Padding(0, 8, 8, 0) });
@@ -133,7 +146,7 @@ public sealed class MainForm : Form
         _onlyProblems.CheckedChanged += (_, _) => ApplyFilters();
         _projects.SelectedIndexChanged += (_, _) => { if (!_loadingProject && _projects.SelectedItem is ProjectRecord project) LoadProject(project); };
         _saveTimer.Tick += (_, _) => { _saveTimer.Stop(); SaveCurrent(); };
-        KeyDown += (_, e) => { if (e.Control && e.KeyCode == Keys.Z && ActiveControl is not TextBoxBase) { Undo(); e.Handled = true; } if (e.Control && e.KeyCode == Keys.S) { SaveCurrent(); e.Handled = true; } };
+        KeyDown += (_, e) => { if (e.Control && e.KeyCode == Keys.Z && !FocusedTextBox(this)) { Undo(); e.Handled = true; } if (e.Control && e.KeyCode == Keys.S) { SaveCurrent(); e.Handled = true; } };
         EnableDropTree(root);
         if (_store.Projects.Count == 0) _store.Create();
         RefreshProjects();
@@ -141,8 +154,11 @@ public sealed class MainForm : Form
         Shown += async (_, _) =>
         {
             _orderSplit.SplitterDistance = Math.Max(650, _orderSplit.Width - 285);
+            if (_selfCheck) return;
             if (Environment.GetCommandLineArgs().Contains("--background")) Hide();
             if (_store.LoadErrors.Count > 0) MessageBox.Show(this, "部分项目无法读取，原文件已保留：\n" + string.Join("\n", _store.LoadErrors), "读取项目");
+            try { await _invoices.RevalidateAsync(); }
+            catch (Exception ex) { MessageBox.Show(this, ex.Message, "发票检查未完成"); }
             await _background.StartAsync();
         };
         FormClosing += (_, e) =>
@@ -231,6 +247,7 @@ public sealed class MainForm : Form
                 try { _store.Save(owner); } catch (Exception ex) { _saveStatus.Text = "保存失败：" + ex.Message; }
                 if (_expenses.Contains(row)) { RefreshRow(row); UpdateSummary(); }
             }
+            else if (owner.Expenses.FirstOrDefault(other => other.Id == row.Id && other.Pending) is { } restored) _ = RecognizeAsync(restored);
         }
     }
 
@@ -243,7 +260,7 @@ public sealed class MainForm : Form
 
     private void AddRow(ExpenseRow row)
     {
-        var panel = new TableLayoutPanel { Height = 162, Width = RowWidth(), ColumnCount = 5, RowCount = 1, Padding = new Padding(8, 7, 8, 7), Margin = new Padding(0), BackColor = Color.White, Tag = row.Id };
+        var panel = new TableLayoutPanel { Height = 205, Width = RowWidth(), ColumnCount = 5, RowCount = 1, Padding = new Padding(8, 7, 8, 7), Margin = new Padding(0), BackColor = Color.White, Tag = row.Id };
         SetColumns(panel);
         var numberBox = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false };
         var number = new Label { AutoSize = true, Text = (_expenses.Count).ToString(CultureInfo.InvariantCulture), Margin = new Padding(2, 5, 0, 7) };
@@ -269,7 +286,7 @@ public sealed class MainForm : Form
 
         var nameBox = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 4, ColumnCount = 1 };
         nameBox.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
-        nameBox.RowStyles.Add(new RowStyle(SizeType.Absolute, 37));
+        nameBox.RowStyles.Add(new RowStyle(SizeType.Absolute, 70));
         nameBox.RowStyles.Add(new RowStyle(SizeType.Absolute, 27));
         nameBox.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         var purpose = new TextBox { Text = row.Purpose, Dock = DockStyle.Top, PlaceholderText = "填写用途" };
@@ -288,10 +305,7 @@ public sealed class MainForm : Form
         var aiButton = new Button { Text = "AI 辅助", AutoSize = true, Font = new Font(Font.FontFamily, 8.5f) };
         aiButton.Click += async (_, _) => {
             if (row.Pending || !AppSettings.Current.AiEnabled) { MessageBox.Show(this, "请等待当前识别完成，或先在设置中启用 AI。", "AI 辅助"); return; }
-            Remember(); row.Pending = true; RefreshRow(row);
-            try { await SemanticClassifier.AssistAsync(row, _lifetime.Token, explicitlyRequested: true); }
-            catch (Exception ex) { row.AiNote = ex.Message; }
-            finally { row.Pending = false; if (_expenses.Contains(row)) { RefreshRow(row); UpdateSummary(); } }
+            Remember(); await AssistRowAsync(row, explicitlyRequested: true);
         };
         categoryLine.Controls.Add(aiButton);
         nameBox.Controls.Add(categoryLine, 0, 1);
@@ -382,7 +396,7 @@ public sealed class MainForm : Form
     {
         try
         {
-            using var preview = new Form { Text = Path.GetFileName(row.ImagePath), WindowState = FormWindowState.Maximized, BackColor = Color.FromArgb(25, 28, 34), FormBorderStyle = FormBorderStyle.None, KeyPreview = true, Cursor = Cursors.Hand };
+            using var preview = new Form { Text = string.IsNullOrEmpty(row.OriginalFilename) ? Path.GetFileName(row.ImagePath) : row.OriginalFilename, WindowState = FormWindowState.Maximized, BackColor = Color.FromArgb(25, 28, 34), FormBorderStyle = FormBorderStyle.None, KeyPreview = true, Cursor = Cursors.Hand };
             using var image = LoadPreview(row.ImagePath);
             var picture = new PictureBox { Dock = DockStyle.Fill, Image = image, SizeMode = PictureBoxSizeMode.Zoom, Cursor = Cursors.Hand };
             picture.Click += (_, _) => preview.Close();
@@ -405,19 +419,18 @@ public sealed class MainForm : Form
     {
         if (!_controls.TryGetValue(row.Id, out var ui)) return;
         _settingValues = true;
-        var edited = row.Edited;
-        if (edited?.Contains("date") != true) ui.Date.Text = row.Date;
-        if (edited?.Contains("purpose") != true) ui.Purpose.Text = row.Purpose;
-        if (edited?.Contains("category") != true) ui.Category.SelectedItem = row.Category;
-        if (edited?.Contains("amount") != true) ui.Amount.Text = row.Amount?.ToString("0.00", CultureInfo.InvariantCulture) ?? "";
+        ui.Date.Text = row.Date;
+        ui.Purpose.Text = row.Purpose;
+        ui.Category.SelectedItem = row.Category;
+        ui.Amount.Text = row.Amount?.ToString("0.00", CultureInfo.InvariantCulture) ?? "";
         ui.Warning.Text = row.Pending ? "正在识别…" : row.Status + (row.Issues.Count > 0 ? " · " + string.Join("；", row.Issues) : "") + (string.IsNullOrEmpty(row.AiNote) ? "" : " · " + row.AiNote);
         ui.Confirmed.Visible = !row.Duplicate && !row.Pending;
         ui.Confirmed.Checked = row.Confirmed;
         ui.RecognizedText.Enabled = !string.IsNullOrWhiteSpace(row.RecognizedText);
-        ui.Panel.Height = row.AmountCandidates.Count > 0 ? 225 : 162;
-        ui.CandidateHint.Visible = row.AmountCandidates.Count > 0 && row.Amount == null && !row.Duplicate;
+        ui.Panel.Height = row.AmountCandidates.Count > 0 ? 255 : 205;
+        ui.CandidateHint.Visible = row.AmountCandidates.Count > 0 && !row.Duplicate;
         ui.Candidates.Visible = ui.CandidateHint.Visible;
-        if (ui.Candidates.Controls.Count != row.AmountCandidates.Count)
+        if (true)
         {
             foreach (Control old in ui.Candidates.Controls.Cast<Control>().ToArray()) old.Dispose();
             ui.Candidates.Controls.Clear();
@@ -449,7 +462,7 @@ public sealed class MainForm : Form
 
     private void MarkEdited(ExpenseRow row, string field)
     {
-        row.Edited.Add(field);
+        row.Edited.Add(field); row.AiRecognized = false;
     }
 
     private void SelectRow(Guid id)
@@ -457,7 +470,7 @@ public sealed class MainForm : Form
         _selected = id;
         var expense = _expenses.FirstOrDefault(row => row.Id == id);
         _preview.Image?.Dispose(); _preview.Image = null;
-        if (expense != null) { try { _preview.Image = LoadPreview(expense.ImagePath); _previewTitle.Text = Path.GetFileName(expense.ImagePath) + "（点击放大）"; } catch { _previewTitle.Text = "截图无法读取"; } }
+        if (expense != null) { try { _preview.Image = LoadPreview(expense.ImagePath); _previewZoom = 1; ResizePreview(); _previewTitle.Text = (string.IsNullOrEmpty(expense.OriginalFilename) ? Path.GetFileName(expense.ImagePath) : expense.OriginalFilename) + "（点击放大）"; } catch { _previewTitle.Text = "截图无法读取"; } }
         foreach (var (rowId, ui) in _controls)
         {
             var color = rowId == id ? Color.FromArgb(219, 235, 255) : Color.White;
@@ -516,6 +529,7 @@ public sealed class MainForm : Form
         _rows.Controls.SetChildIndex(_controls[sourceId].Panel, target);
         Renumber();
         SelectRow(sourceId);
+        UpdateSummary();
     }
 
     private void Delete(ExpenseRow row)
@@ -530,7 +544,7 @@ public sealed class MainForm : Form
             ui.Image.Image?.Dispose();
             ui.Panel.Dispose();
         }
-        if (_selected == row.Id) _selected = null;
+        if (_selected == row.Id) { _selected = null; _preview.Image?.Dispose(); _preview.Image = null; _previewTitle.Text = "点击一笔订单查看截图"; }
         if (!wasDuplicate)
         {
             var promoted = _expenses.FirstOrDefault(candidate => candidate.Fingerprint == row.Fingerprint && candidate.Duplicate);
@@ -570,8 +584,11 @@ public sealed class MainForm : Form
         var total = unique.Where(row => row.Amount > 0).Sum(row => row.Amount ?? 0);
         var pending = unique.Count(row => row.Issues.Count > 0);
         _summary.Text = $"已导入 {_expenses.Count} 张 · 有效 {unique.Count} 笔 · 待处理 {pending} 笔 · 已填合计 ¥{total:N2}";
+        foreach (var row in _expenses)
+            if (_controls.TryGetValue(row.Id, out var ui)) ui.Warning.Text = row.Pending ? "正在识别…" : row.Status + (row.Issues.Count > 0 ? " · " + string.Join("；", row.Issues) : "") + (string.IsNullOrEmpty(row.AiNote) ? "" : " · " + row.AiNote);
         _blocker.Text = Blocker() ?? "可导出";
         _export.Enabled = Blocker() == null;
+        _undoButton.Enabled = _undo.Count > 0 && !_expenses.Any(row => row.Pending);
         ApplyFilters();
         if (!_loadingProject) { _dirty = true; _saveStatus.Text = "等待保存…"; _saveTimer.Stop(); _saveTimer.Start(); }
     }
@@ -586,6 +603,64 @@ public sealed class MainForm : Form
         catch (Exception ex) { MessageBox.Show(this, ex.Message, "导出失败", MessageBoxButtons.OK, MessageBoxIcon.Error); }
     }
 
+    internal void SelfCheck()
+    {
+        _selfCheck = true;
+        Show(); Application.DoEvents();
+        if (_orderSplit.Width < 900 || !_title.Visible || !_export.Visible) throw new InvalidOperationException("主窗口未正确显示");
+        var imagePath = Path.Combine(AppPaths.Root, "sample.png");
+        using (var image = new Bitmap(700, 220))
+        {
+            using var graphics = Graphics.FromImage(image); graphics.Clear(Color.White);
+            using var font = new Font("Arial", 28);
+            graphics.DrawString("Payment 39.00", font, Brushes.Black, 30, 70);
+            image.Save(imagePath, ImageFormat.Png);
+        }
+        _ = Recognition.FromPng(File.ReadAllBytes(imagePath), _tessdataDirectory);
+        var row = new ExpenseRow { ImagePath = imagePath, OriginalFilename = "sample.png", Amount = 39m, Purpose = "交通费用", Category = "交通", Date = "2026-09-24" };
+        _expenses.Add(row); AddRow(row); RefreshRow(row); UpdateSummary(); SaveCurrent();
+        if (!_export.Enabled || _project.Expenses.Count != 1) throw new InvalidOperationException("订单保存或导出校验失败");
+        row.AmountCandidates = [new(49m, "新候选")]; row.Amount = null; RefreshRow(row);
+        row.Edited.Add("amount"); row.Amount = 49m; RefreshRow(row);
+        if (_controls[row.Id].Amount.Text != "49.00") throw new InvalidOperationException("人工金额未正确显示");
+        var export = Path.Combine(AppPaths.Root, "self-check.xlsx");
+        WorkbookExporter.Export(export, _project.Title, _expenses);
+        if (!File.Exists(export)) throw new InvalidOperationException("Excel 未生成");
+        var reloaded = new ProjectStore();
+        if (reloaded.Projects.Single().Expenses.Single().Amount != 39m) throw new InvalidOperationException("自动保存读取不一致");
+        Size = MinimumSize; Application.DoEvents();
+        if (_controls[row.Id].Panel.Height < 200) throw new InvalidOperationException("订单操作区域高度不足");
+        _exitRequested = true; Close();
+    }
+
+    private static bool FocusedTextBox(Control parent) => parent is TextBoxBase && parent.Focused || parent.Controls.Cast<Control>().Any(FocusedTextBox);
+    private void ResizePreview()
+    {
+        if (_preview.Image == null) return;
+        var width = Math.Max(50, (int)((_previewScroll.ClientSize.Width - 22) * _previewZoom));
+        _preview.Size = new Size(width, Math.Max(1, (int)((double)_preview.Image.Height / _preview.Image.Width * width)));
+    }
+    private async Task AssistRowAsync(ExpenseRow row, bool explicitlyRequested = false)
+    {
+        var owner = _store.Projects.FirstOrDefault(project => project.Expenses.Contains(row));
+        if (owner == null || !_recognizing.Add(row.Id)) return;
+        row.Pending = true;
+        if (_expenses.Contains(row)) { RefreshRow(row); UpdateSummary(); }
+        try { await SemanticClassifier.AssistAsync(row, _lifetime.Token, explicitlyRequested); }
+        catch (OperationCanceledException) { row.AiNote = "AI 识别已停止"; }
+        catch (Exception ex) { row.AiNote = ex.Message; }
+        finally
+        {
+            row.Pending = false; _recognizing.Remove(row.Id);
+            if (owner.Expenses.Contains(row))
+            {
+                try { _store.Save(owner); } catch (Exception ex) { _saveStatus.Text = "保存失败：" + ex.Message; }
+                if (_expenses.Contains(row)) { RefreshRow(row); UpdateSummary(); }
+            }
+            else if (owner.Expenses.FirstOrDefault(other => other.Id == row.Id && other.Pending) is { } restored) _ = RecognizeAsync(restored);
+        }
+    }
+
     private void EnableDropTree(Control parent)
     {
         EnableDrop(parent);
@@ -594,6 +669,7 @@ public sealed class MainForm : Form
     private void Remember()
     {
         if (_loadingProject || _project == null) return;
+        if (_undo.Count >= 30) { var remaining = _undo.Reverse().Skip(1).ToArray(); _undo.Clear(); foreach (var snapshot in remaining) _undo.Push(snapshot); }
         _undo.Push(ProjectStore.Snapshot(_project));
         _undoButton.Enabled = true;
     }
@@ -623,12 +699,12 @@ public sealed class MainForm : Form
     }
     private void LoadProject(ProjectRecord project, bool clearUndo = true)
     {
-        if (!SaveCurrent()) return;
+        if (!SaveCurrent()) { RefreshProjects(); return; }
         _loadingProject = true;
         foreach (var ui in _controls.Values) { ui.Image.Image?.Dispose(); ui.Panel.Dispose(); }
         _rows.Controls.Clear(); _controls.Clear();
         _project = project; _expenses = project.Expenses; _title.Text = project.Title;
-        _selected = null;
+        _selected = null; _preview.Image?.Dispose(); _preview.Image = null; _previewTitle.Text = "点击一笔订单查看截图";
         if (clearUndo) _undo.Clear();
         _undoButton.Enabled = _undo.Count > 0;
         foreach (var row in _expenses) { AddRow(row); RefreshRow(row); }
@@ -655,8 +731,18 @@ public sealed class MainForm : Form
     {
         if (_expenses.Any(row => row.Pending)) { MessageBox.Show(this, "请等待识别完成后再删除项目。", "正在处理"); return; }
         if (MessageBox.Show(this, "将此项目资料移入回收站？发票箱原件、邮箱及已导出文件保留。", "删除项目", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
-        try { _saveTimer.Stop(); var deletedId = _project.Id; _store.Delete(_project); await _invoices.DetachProjectAsync(deletedId); _dirty = false; if (_store.Projects.Count == 0) _store.Create(); LoadProject(_store.Projects[0]); }
+        _host.Enabled = false;
+        try
+        {
+            _saveTimer.Stop(); var deletedId = _project.Id;
+            _store.Delete(_project); _dirty = false;
+            try { await _invoices.DetachProjectAsync(deletedId); }
+            catch (Exception ex) { MessageBox.Show(this, "项目已移入回收站，但发票归属释放未完成：" + ex.Message, "请检查发票归属"); }
+            if (_store.Projects.Count == 0) _store.Create();
+            LoadProject(_store.Projects[0]);
+        }
         catch (Exception ex) { MessageBox.Show(this, "删除已停止：" + ex.Message, "无法移入回收站"); }
+        finally { _host.Enabled = true; }
     }
     private void RestoreWindow() { Show(); WindowState = FormWindowState.Normal; Activate(); }
     private void ShowOrders() { _invoiceWorkspace.Visible = false; _orderSplit.Visible = true; _orderSplit.BringToFront(); }
@@ -665,7 +751,12 @@ public sealed class MainForm : Form
     private async void OpenSettings()
     {
         using var settings = new SettingsForm(_tessdataDirectory, _invoices);
-        if (settings.ShowDialog(this) == DialogResult.OK) { await _background.SettingsChangedAsync(); }
+        if (settings.ShowDialog(this) == DialogResult.OK)
+        {
+            await _background.SettingsChangedAsync();
+            if (AppSettings.Current.AiEnabled)
+                foreach (var row in _store.Projects.SelectMany(project => project.Expenses).Where(row => !row.Pending && SemanticClassifier.NeedsAssistance(row)).ToArray()) await AssistRowAsync(row);
+        }
     }
     private void ApplyFilters()
     {
