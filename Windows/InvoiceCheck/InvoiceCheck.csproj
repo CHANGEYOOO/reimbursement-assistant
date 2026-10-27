@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable></PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="PdfPig" Version="0.1.16" />
+    <PackageReference Include="PDFtoImage" Version="5.4.0" />
+    <PackageReference Include="Magick.NET-Q8-x64" Version="14.11.0" />
+    <PackageReference Include="Tesseract" Version="5.2.0" />
+    <Compile Include="../ReimburseApp/InvoiceRecognition.cs" Link="InvoiceRecognition.cs" />
+    <Compile Include="../ReimburseApp/InvoiceRepository.cs" Link="InvoiceRepository.cs" />
+  </ItemGroup>
+</Project>

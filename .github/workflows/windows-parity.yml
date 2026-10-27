@@ -1,0 +1,47 @@
+name: Windows parity build
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  package:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.401'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Order rules and AI evidence checks
+        run: dotnet run --project Windows/RecognitionCheck -c Release
+      - name: Invoice whitelist and queue checks
+        run: dotnet run --project Windows/InvoiceCheck -c Release
+      - name: Mail and settings boundary checks
+        run: dotnet run --project Windows/MailSettingsCheck -c Release
+      - name: Publish self-contained app
+        run: dotnet publish Windows/ReimburseApp -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o build/windows-app
+      - name: Get verified Microsoft VC++ runtime
+        shell: pwsh
+        run: |
+          Invoke-WebRequest https://aka.ms/vs/17/release/vc_redist.x64.exe -OutFile build/vc_redist.x64.exe
+          $signature = Get-AuthenticodeSignature build/vc_redist.x64.exe
+          if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'Microsoft Corporation') { throw 'Microsoft runtime signature verification failed' }
+      - name: Package installer payload
+        run: python scripts/package-windows-installer.py --payload-dir build/windows-app --runtime build/vc_redist.x64.exe --output build/windows-payload.zip
+      - name: Publish installer
+        run: dotnet publish Windows/Installer -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o build/windows-installer
+      - name: Name delivery and checksum
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory build/delivery -Force | Out-Null
+          Copy-Item 'build/windows-installer/报销单助手-安装程序-1.27.exe' 'build/delivery/ReimbursementAssistant-Windows-1.27-Setup.exe'
+          $hash = (Get-FileHash 'build/delivery/ReimbursementAssistant-Windows-1.27-Setup.exe' -Algorithm SHA256).Hash.ToLower()
+          Set-Content -Path 'build/delivery/SHA256.txt' -Value "$hash  ReimbursementAssistant-Windows-1.27-Setup.exe" -Encoding utf8
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ReimbursementAssistant-Windows-1.27
+          path: build/delivery/
+          retention-days: 14

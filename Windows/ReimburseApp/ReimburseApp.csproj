@@ -9,9 +9,13 @@
     <ApplicationIcon>../../Assets/AppIcon.ico</ApplicationIcon>
     <AssemblyName>报销单助手</AssemblyName>
     <RootNamespace>ReimburseApp</RootNamespace>
-    <Version>1.2.0</Version>
+    <Version>1.27.0</Version>
   </PropertyGroup>
   <ItemGroup>
+    <PackageReference Include="MailKit" Version="4.18.2" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.14" />
+    <PackageReference Include="PdfPig" Version="0.1.16" />
+    <PackageReference Include="PDFtoImage" Version="5.4.0" />
     <PackageReference Include="ClosedXML" Version="0.105.0" />
     <PackageReference Include="Magick.NET-Q8-x64" Version="14.11.0" />
     <PackageReference Include="Tesseract" Version="5.2.0" GeneratePathProperty="true" />
