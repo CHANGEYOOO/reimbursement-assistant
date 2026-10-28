@@ -44,7 +44,7 @@ enum InvoiceDocumentClassifier {
                 if let reason = embedded.reason { return (.unknown, reason) }
                 if !embedded.texts.isEmpty {
                     guard document.pageCount == 1,
-                          embedded.texts.allSatisfy({ classify(text: $0, filename: filename).kind == .invoice && identity($0) == identity(verifiedTexts[0]) }) else {
+                          embedded.texts.allSatisfy({ fieldsAgree($0, verifiedTexts[0]) }) else {
                         return (.unknown, "PDF内嵌发票数据与票面字段不一致、字段不全或存在多页映射歧义。")
                     }
                 }
@@ -124,10 +124,23 @@ enum InvoiceDocumentClassifier {
         return (total, net, tax)
     }
 
+    static func targetType(in text: String) -> String? {
+        let titles = text.components(separatedBy: .newlines).map(compact).filter(invoiceTitle)
+        guard let title = titles.first else { return nil }
+        let types = Set(titles.map { title in
+            (title.hasPrefix("电子发票") ? "digital_" : "vat_electronic_") + (title.contains("普通发票") ? "general" : "special")
+        })
+        guard types.count == 1 else { return nil }
+        return (title.hasPrefix("电子发票") ? "digital_" : "vat_electronic_") + (title.contains("普通发票") ? "general" : "special")
+    }
+    static func fieldsAgree(_ first: String, _ second: String) -> Bool {
+        classify(text: first, filename: "").kind == .invoice && classify(text: second, filename: "").kind == .invoice && identity(first) == identity(second)
+    }
+
     private static func identity(_ text: String) -> [String] {
         let lines = text.components(separatedBy: .newlines).map(compact).filter { !$0.isEmpty }
         let source = lines.joined(separator: "\n")
-        var values = [field("(?:发票号码|发票号)", lines: lines, value: #"(?:[0-9]{20}|[0-9]{8})"#) ?? "",
+        var values = [targetType(in: text) ?? "", field("(?:发票号码|发票号)", lines: lines, value: #"(?:[0-9]{20}|[0-9]{8})"#) ?? "",
                       field("发票代码", lines: lines, value: #"(?:[0-9]{12}|[0-9]{10})"#) ?? ""]
         let date = field("开票日期", lines: lines, value: #"[0-9]{4}[年./-][0-9]{1,2}[月./-][0-9]{1,2}日?"#) ?? ""
         values.append(date.split(whereSeparator: { !$0.isNumber }).compactMap { Int($0) }.map(String.init).joined(separator: "-"))

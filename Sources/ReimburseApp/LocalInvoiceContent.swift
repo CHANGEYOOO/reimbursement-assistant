@@ -22,7 +22,14 @@ enum LocalInvoiceContent {
     }
 
     static func embeddedInvoices(at url: URL) -> (texts: [String], reason: String?) {
-        guard let pdf = CGPDFDocument(url as CFURL), let catalog = pdf.catalog else { return ([], "PDF内部结构无法读取。") }
+        embeddedInvoices(document: CGPDFDocument(url as CFURL))
+    }
+    static func embeddedInvoices(in data: Data) -> (texts: [String], reason: String?) {
+        guard let provider = CGDataProvider(data: data as CFData) else { return ([], "PDF内部结构无法读取。") }
+        return embeddedInvoices(document: CGPDFDocument(provider))
+    }
+    private static func embeddedInvoices(document: CGPDFDocument?) -> (texts: [String], reason: String?) {
+        guard let pdf = document, let catalog = pdf.catalog else { return ([], "PDF内部结构无法读取。") }
         var names: CGPDFDictionaryRef?
         var tree: CGPDFDictionaryRef?
         guard CGPDFDictionaryGetDictionary(catalog, "Names", &names), let names,

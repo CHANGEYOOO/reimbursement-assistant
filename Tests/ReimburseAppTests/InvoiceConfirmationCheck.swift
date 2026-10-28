@@ -4,6 +4,9 @@ import AppKit
 
 @main struct InvoiceConfirmationCheck {
     @MainActor static func main() async throws {
+        let previousArguments = UserDefaults.standard.volatileDomain(forName: UserDefaults.argumentDomain)
+        UserDefaults.standard.setVolatileDomain(previousArguments.merging(["reimbursement.ai.enabled": false, "reimbursement.ai.invoiceFallbackEnabled": false]) { _, test in test }, forName: UserDefaults.argumentDomain)
+        defer { UserDefaults.standard.setVolatileDomain(previousArguments, forName: UserDefaults.argumentDomain) }
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("invoice-confirmation-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -86,6 +89,11 @@ import AppKit
         precondition(FileManager.default.fileExists(atPath: store.sourceURL(for: retained).path),
                      "Uncertain files are retained with an explanation for manual review")
         precondition(FileManager.default.fileExists(atPath: invalid.path))
+        store.updateAmount("123.45", for: retained.id)
+        try await store.rerecognize(retained.id)
+        let retried = store.invoices.first { $0.id == retained.id }!
+        precondition(retried.documentKind == .unknown && retried.amount == Decimal(string: "123.45") && store.pendingIDs.isEmpty,
+                     "Current-policy pending files can be rechecked without losing manual amounts")
         let tripURL = directory.appendingPathComponent("发票金额99.00.pdf")
         let tripData = NSMutableData()
         var bounds = CGRect(x: 0, y: 0, width: 600, height: 400)

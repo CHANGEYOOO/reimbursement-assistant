@@ -28,6 +28,8 @@ import UniformTypeIdentifiers
 }
 
 struct InvoiceInboxView: View {
+    @AppStorage("reimbursement.ai.enabled") private var aiEnabled = false
+    @AppStorage("reimbursement.ai.invoiceFallbackEnabled") private var invoiceAIEnabled = false
     @ObservedObject var inbox: InvoiceInboxStore
     let projects: [DraftSummary]
     let targetProject: DraftSummary?
@@ -82,6 +84,10 @@ struct InvoiceInboxView: View {
                 Button("导入发票", action: importFiles)
             }
             if !syncStatus.isEmpty { Text(syncStatus).font(.caption).foregroundStyle(.secondary) }
+            if let status = inbox.aiStatus {
+                ScrollView { Text(status).font(.caption).foregroundStyle(.secondary).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }
+                    .frame(maxHeight: 72)
+            }
             filters
             Text("本地检查电子发票；可疑附件保留在“待确认”，明确的行程单、明细单等归入“非发票附件”，不计入项目发票。")
                 .font(.caption).foregroundStyle(.secondary)
@@ -236,6 +242,12 @@ struct InvoiceInboxView: View {
                 Button("删除", role: .destructive) { controls.deleteIDs = [item.id]; controls.confirmingDelete = true }
                     .disabled(pending || controls.busy)
                 if downloaded && item.documentKind == .unknown && !item.isAcceptedInvoice {
+                    Button("AI兜底识别") {
+                        Task {
+                            do { try await inbox.rerecognize(item.id) } catch { controls.error = error.localizedDescription }
+                        }
+                    }.disabled(!aiEnabled || !invoiceAIEnabled || pending || controls.busy)
+                        .help("仅发送当前文件的提取文字和页面预览；已缓存结果会直接复用")
                     Button("人工确认是发票") {
                         do { try inbox.confirmInvoice(item.id) } catch { controls.error = error.localizedDescription }
                     }.disabled(pending || controls.busy)

@@ -40,6 +40,8 @@ private struct InboxSnapshot: Codable {
     @Published public private(set) var items: [InboxInvoice] = []
     @Published public private(set) var pendingIDs: Set<UUID> = []
     @Published public private(set) var lastError: String?
+    @Published private var aiStatuses: [UUID: String] = [:]
+    public var aiStatus: String? { aiStatuses.isEmpty ? nil : aiStatuses.values.sorted().joined(separator: "\n") }
     private let directory: URL
     private let projectsDirectory: URL
     private var editedIDs: Set<UUID> = []
@@ -228,7 +230,7 @@ private struct InboxSnapshot: Codable {
         guard !pendingIDs.contains(id) else { throw failure("该发票正在处理，请稍后再试。") }
         pendingIDs.insert(id)
         defer { pendingIDs.remove(id) }
-        try await recognize(id, at: sourceURL(for: item), namedAmount: item.amount, metadataOnly: true)
+        try await recognize(id, at: sourceURL(for: item), namedAmount: item.amount, metadataOnly: (item.amount ?? .zero) > 0)
     }
 
     public func refreshMissingTitles() async {
@@ -296,13 +298,26 @@ private struct InboxSnapshot: Codable {
 
     private func recognize(_ id: UUID, at destination: URL, namedAmount: Decimal?, metadataOnly: Bool = false) async throws {
         let filename = items.first(where: { $0.id == id })?.originalFilename ?? destination.lastPathComponent
-        let result: (text: String, buyer: String, seller: String, item: String, amount: Decimal?, kind: InvoiceDocumentKind, reason: String) = await Task.detached(priority: .userInitiated) {
-            let classification = InvoiceDocumentClassifier.classify(at: destination, text: "", filename: filename)
+        let local = await Task.detached(priority: .userInitiated) {
+            InvoiceDocumentClassifier.classify(at: destination, text: "", filename: filename)
+        }.value
+        guard let current = items.first(where: { $0.id == id }) else { return }
+        let classification: (kind: InvoiceDocumentKind, reason: String)
+        if current.manuallyConfirmed == true {
+            classification = local
+        } else {
+            classification = await InvoiceAIFallback.reviewIfNeeded(at: destination, local: local, willUpload: {
+                self.aiStatuses[id] = "本地待确认，AI正在发送提取文字及页面预览：" + filename
+            })
+            aiStatuses[id] = nil
+        }
+        guard items.contains(where: { $0.id == id }) else { return }
+        let result: (text: String, buyer: String, seller: String, item: String, amount: Decimal?) = await Task.detached(priority: .userInitiated) {
             let text = classification.kind == .invoice ? ((try? InvoiceStore.invoiceText(at: destination)) ?? "") : ""
             let details = classification.kind == .invoice
                 ? try? InvoicePartyRecognition.details(at: destination, text: text) : nil
             let amount = metadataOnly || classification.kind != .invoice ? nil : try? InvoiceAmountRecognition.total(at: destination, text: text)
-            return (text, details?.buyer ?? "", details?.seller ?? "", details?.item ?? "", amount, classification.kind, classification.reason)
+            return (text, details?.buyer ?? "", details?.seller ?? "", details?.item ?? "", amount)
         }.value
         guard let index = items.firstIndex(where: { $0.id == id }) else { return }
         var updated = items
@@ -315,10 +330,10 @@ private struct InboxSnapshot: Codable {
         }
         if !metadataOnly || updated[index].sellerTitle.isEmpty { updated[index].sellerTitle = result.seller }
         if !metadataOnly || updated[index].itemDescription.isEmpty { updated[index].itemDescription = result.item }
-        if !metadataOnly { updated[index].warning = result.kind == .invoice && (updated[index].amount ?? .zero) <= 0 ? "未识别到价税合计，请手动填写。" : nil }
+        if !metadataOnly { updated[index].warning = classification.kind == .invoice && (updated[index].amount ?? .zero) <= 0 ? "未识别到价税合计，请手动填写。" : nil }
         if updated[index].documentPolicyRevision != InvoiceDocumentClassifier.policyRevision { updated[index].manuallyConfirmed = nil }
-        updated[index].documentKind = result.kind
-        updated[index].documentReason = result.reason
+        updated[index].documentKind = classification.kind
+        updated[index].documentReason = classification.reason
         updated[index].documentPolicyRevision = InvoiceDocumentClassifier.policyRevision
         try persist(updated)
         items = updated

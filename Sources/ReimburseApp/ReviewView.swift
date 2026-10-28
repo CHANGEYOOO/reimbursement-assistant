@@ -309,6 +309,10 @@ public struct ReviewView: View {
                         Text(controls.exportStatus).font(.caption).foregroundStyle(.secondary)
                             .padding(.horizontal)
                     }
+                    if let status = invoices.aiStatus {
+                        ScrollView { Text(status).font(.caption).foregroundStyle(.secondary).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }
+                            .frame(maxHeight: 72).padding(.horizontal)
+                    }
                     InvoiceSummaryView(orderTotal: store.amountTotal, invoiceTotal: invoices.total,
                                        confirmationCount: invoices.confirmationCount,
                                        hasUnresolvedAmounts: store.hasUnresolvedAmounts)
@@ -683,6 +687,8 @@ public struct ReviewView: View {
 }
 
 private struct InvoiceRow: View {
+    @AppStorage("reimbursement.ai.enabled") private var aiEnabled = false
+    @AppStorage("reimbursement.ai.invoiceFallbackEnabled") private var invoiceAIEnabled = false
     let invoice: Invoice
     @ObservedObject var store: InvoiceStore
     let preview: (URL) -> Void
@@ -710,6 +716,12 @@ private struct InvoiceRow: View {
             if let warning = invoice.warning { Text(warning).font(.caption).foregroundStyle(.orange) }
             else if store.needsConfirmation(invoice) { Text("待确认金额").font(.caption).foregroundStyle(.orange) }
             if invoice.documentKind == .unknown && !invoice.isAccepted {
+                Button("AI兜底识别") {
+                    Task {
+                        do { try await store.rerecognize(invoice.id) } catch { reportError(error.localizedDescription) }
+                    }
+                }.disabled(!aiEnabled || !invoiceAIEnabled || store.pendingIDs.contains(invoice.id))
+                    .help("仅发送当前文件的提取文字和页面预览；已缓存结果会直接复用")
                 Button("人工确认是发票") {
                     do { try store.confirmInvoice(invoice.id) } catch { reportError(error.localizedDescription) }
                 }.disabled(store.pendingIDs.contains(invoice.id))

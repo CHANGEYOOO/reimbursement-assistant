@@ -10,6 +10,9 @@ import Foundation
     }
 
     @MainActor static func main() async throws {
+        let previousArguments = UserDefaults.standard.volatileDomain(forName: UserDefaults.argumentDomain)
+        UserDefaults.standard.setVolatileDomain(previousArguments.merging(["reimbursement.ai.enabled": false, "reimbursement.ai.invoiceFallbackEnabled": false]) { _, test in test }, forName: UserDefaults.argumentDomain)
+        defer { UserDefaults.standard.setVolatileDomain(previousArguments, forName: UserDefaults.argumentDomain) }
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("invoice-title-retry-\(UUID().uuidString)", isDirectory: true)
         let box = root.appendingPathComponent("box", isDirectory: true)
         let files = box.appendingPathComponent("files", isDirectory: true)

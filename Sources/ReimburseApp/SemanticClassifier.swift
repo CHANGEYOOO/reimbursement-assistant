@@ -87,6 +87,13 @@ public struct AIRequestConfiguration: Sendable {
             UserDefaults.standard.set(newValue, forKey: prefix + "enabled")
         }
     }
+    public static var invoiceFallbackEnabled: Bool {
+        get { UserDefaults.standard.bool(forKey: prefix + "invoiceFallbackEnabled") }
+        set {
+            if invoiceFallbackEnabled != newValue { revision += 1 }
+            UserDefaults.standard.set(newValue, forKey: prefix + "invoiceFallbackEnabled")
+        }
+    }
     public static var provider: AIProvider {
         get { AIProvider(rawValue: UserDefaults.standard.string(forKey: prefix + "provider") ?? "") ?? .deepSeek }
         set {
@@ -235,23 +242,8 @@ public enum SemanticClassifier {
 
     public static func classify(text: String, configuration: AIRequestConfiguration, includeAmount: Bool = false, includeDate: Bool = false, referenceDate: Date = Date()) async throws -> SemanticClassification {
         let request = try makeRequest(text: text, configuration: configuration, includeAmount: includeAmount, includeDate: includeDate, referenceDate: referenceDate)
-        let settings = URLSessionConfiguration.ephemeral
-        settings.timeoutIntervalForRequest = 45
-        settings.timeoutIntervalForResource = 45
-        settings.httpCookieStorage = nil
-        settings.urlCredentialStorage = nil
-        settings.urlCache = nil
-        let session = URLSession(configuration: settings, delegate: NoRedirect(), delegateQueue: nil)
-        defer { session.invalidateAndCancel() }
-        let data: Data
-        let response: URLResponse
-        do { (data, response) = try await session.data(for: request) }
-        catch {
-            if Task.isCancelled { throw CancellationError() }
-            throw SemanticError.connection
-        }
-        guard let http = response as? HTTPURLResponse else { throw SemanticError.invalidResponse }
-        let result = try decodeResponse(data, statusCode: http.statusCode, sourceText: text, referenceDate: referenceDate)
+        let (data, statusCode) = try await AIHTTPClient.send(request)
+        let result = try decodeResponse(data, statusCode: statusCode, sourceText: text, referenceDate: referenceDate)
         return SemanticClassification(category: result.category, isCertain: result.isCertain, reason: result.reason,
             payment: includeAmount ? result.payment : nil, transactionDate: includeDate ? result.transactionDate : nil)
     }
@@ -461,6 +453,28 @@ public enum SemanticClassifier {
         let baseReason = proposed != nil && date == nil ? "AI 日期缺少有效原文依据，请人工确认" : reason
         return SemanticDate(date: date, isCertain: certain,
             reason: annotated(baseReason, dates: candidates + [date].compactMap { $0 }), candidates: candidates)
+    }
+}
+
+enum AIHTTPClient {
+    static func send(_ request: URLRequest) async throws -> (Data, Int) {
+        let settings = URLSessionConfiguration.ephemeral
+        settings.timeoutIntervalForRequest = 45
+        settings.timeoutIntervalForResource = 45
+        settings.httpCookieStorage = nil
+        settings.urlCredentialStorage = nil
+        settings.urlCache = nil
+        let session = URLSession(configuration: settings, delegate: NoRedirect(), delegateQueue: nil)
+        defer { session.invalidateAndCancel() }
+        let data: Data
+        let response: URLResponse
+        do { (data, response) = try await session.data(for: request) }
+        catch {
+            if Task.isCancelled { throw CancellationError() }
+            throw SemanticError.connection
+        }
+        guard let http = response as? HTTPURLResponse else { throw SemanticError.invalidResponse }
+        return (data, http.statusCode)
     }
 
     private final class NoRedirect: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
