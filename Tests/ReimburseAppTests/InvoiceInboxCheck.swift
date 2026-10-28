@@ -75,9 +75,18 @@ import AppKit
         precondition(recovered.receivedAt == received)
         let reopened = InvoiceInboxStore(directory: box, projectsDirectory: projects)
         precondition(reopened.items.count == 2 && reopened.items.first(where: { $0.id == pending.id })?.receivedAt == received)
+        func importMailFixture(_ url: URL, uid: UInt64) async throws {
+            let remote = MailAttachmentReference(account: "offline@qq.com", uidValidity: "7", uid: uid, partID: "2", encoding: "BASE64", size: 100)
+            let message = InvoiceMailMessage(id: "mail-\(uid)", receivedAt: received, subject: "电子发票附件", sender: "offline@example.com",
+                attachments: [InvoiceMailAttachment(filename: url.lastPathComponent, remote: remote)], hasDownloadLink: false)
+            try store.registerRemote(message)
+            let item = store.items.first { $0.remote?.uid == uid }!
+            try Data(contentsOf: url).write(to: store.sourceURL(for: item))
+            _ = try await store.download(item.id)
+        }
         let rejectedFile = root.appendingPathComponent("发票报销单金额66.00.pdf")
         try makePDF(title: "费用报销单").write(to: rejectedFile)
-        await store.importFiles([rejectedFile])
+        try await importMailFixture(rejectedFile, uid: 900)
         let rejected = store.items.first { $0.originalFilename == rejectedFile.lastPathComponent }!
         precondition(!rejected.isAcceptedInvoice, "A filename amount cannot turn a report into an invoice")
         try store.update(rejected.id, amount: "66", buyerTitle: "手动抬头")
@@ -86,7 +95,7 @@ import AppKit
         precondition(!store.items.first(where: { $0.id == rejected.id })!.isAcceptedInvoice, "Explicit non-invoices cannot be manually promoted")
         let uncertainFile = root.appendingPathComponent("未知附件.pdf")
         try makePDF(title: "普通附件").write(to: uncertainFile)
-        await store.importFiles([uncertainFile])
+        try await importMailFixture(uncertainFile, uid: 901)
         let uncertain = store.items.first { $0.originalFilename == uncertainFile.lastPathComponent }!
         precondition(uncertain.documentKind == .unknown && !uncertain.isAcceptedInvoice)
         try store.update(uncertain.id, amount: "39", buyerTitle: "购买方")

@@ -83,17 +83,17 @@ import AppKit
         store.importFiles([invalid])
         try await Task.sleep(for: .milliseconds(20))
         while !store.pendingIDs.isEmpty { try await Task.sleep(for: .milliseconds(10)) }
-        precondition(store.invoices.count == 2 && store.acceptedInvoices.isEmpty && store.unknownCount == 2)
+        precondition(store.invoices.count == 2 && store.acceptedInvoices.count == 1 && store.unknownCount == 1)
         let retained = store.invoices.first { $0.originalFilename == invalid.lastPathComponent }!
-        precondition(retained.documentKind == .unknown && retained.documentReason != nil)
+        precondition(retained.documentKind == .invoice && retained.manuallyImported == true && retained.documentReason != nil)
         precondition(FileManager.default.fileExists(atPath: store.sourceURL(for: retained).path),
-                     "Uncertain files are retained with an explanation for manual review")
+                     "Manual files are retained as user-provided invoices without document screening")
         precondition(FileManager.default.fileExists(atPath: invalid.path))
         store.updateAmount("123.45", for: retained.id)
         try await store.rerecognize(retained.id)
         let retried = store.invoices.first { $0.id == retained.id }!
-        precondition(retried.documentKind == .unknown && retried.amount == Decimal(string: "123.45") && store.pendingIDs.isEmpty,
-                     "Current-policy pending files can be rechecked without losing manual amounts")
+        precondition(retried.documentKind == .invoice && retried.manuallyImported == true && retried.amount == Decimal(string: "123.45") && store.pendingIDs.isEmpty,
+                     "Manually imported invoices are not reclassified and preserve user amounts")
         let tripURL = directory.appendingPathComponent("发票金额99.00.pdf")
         let tripData = NSMutableData()
         var bounds = CGRect(x: 0, y: 0, width: 600, height: 400)
@@ -110,10 +110,62 @@ import AppKit
         try await Task.sleep(for: .milliseconds(20))
         while !store.pendingIDs.isEmpty { try await Task.sleep(for: .milliseconds(10)) }
         let trip = store.invoices.first { $0.originalFilename == tripURL.lastPathComponent }!
-        precondition(trip.documentKind == .nonInvoice && trip.documentReason != nil && store.excludedCount == 1)
-        precondition(store.unknownCount == 2 && store.acceptedInvoices.isEmpty)
+        precondition(trip.documentKind == .invoice && trip.manuallyImported == true && store.excludedCount == 0)
+        precondition(store.unknownCount == 1 && store.acceptedInvoices.count == 2)
         precondition(FileManager.default.fileExists(atPath: store.sourceURL(for: trip).path),
-                     "Explicit supporting documents stay available in excluded records, never export as invoices")
+                     "Manual import follows the user's supplied-invoice decision, not local document classification")
+        let noAmount = directory.appendingPathComponent("无金额文件.pdf")
+        try Data("没有任何可识别的票面字段".utf8).write(to: noAmount)
+        store.importFiles([noAmount])
+        try await Task.sleep(for: .milliseconds(20))
+        while !store.pendingIDs.isEmpty { try await Task.sleep(for: .milliseconds(10)) }
+        let missingAmount = store.invoices.first { $0.originalFilename == noAmount.lastPathComponent }!
+        precondition(missingAmount.isAccepted && missingAmount.manuallyImported == true && store.needsConfirmation(missingAmount),
+                     "A manual invoice with unreadable fields stays accepted but still needs a valid amount")
+        let oldUnknown = Invoice(id: retained.id, storedFilename: "missing-copy.pdf", originalFilename: retained.originalFilename,
+            fingerprint: retained.fingerprint, amount: Decimal(string: "123.45"), warning: "旧待确认", documentKind: .unknown,
+            documentReason: "旧待确认", documentPolicyRevision: InvoiceDocumentClassifier.policyRevision)
+        try JSONEncoder().encode([oldUnknown]).write(to: directory.appendingPathComponent("invoices.json"))
+        store.configure(directory: directory)
+        store.importFiles([invalid])
+        try await Task.sleep(for: .milliseconds(20))
+        while !store.pendingIDs.isEmpty { try await Task.sleep(for: .milliseconds(10)) }
+        precondition(store.invoices.count == 1 && store.invoices[0].manuallyImported == true && store.invoices[0].isAccepted)
+        precondition(store.invoices[0].amount == Decimal(string: "123.45"), "Repeat imports must preserve an existing user amount")
+        let restoredCopy = try Data(contentsOf: store.sourceURL(for: store.invoices[0]))
+        let suppliedCopy = try Data(contentsOf: invalid)
+        precondition(restoredCopy == suppliedCopy,
+                     "A repeat import restores a missing stored copy without duplicating the invoice")
+        var manualAcrossPolicy = store.invoices[0]
+        manualAcrossPolicy.documentPolicyRevision = 0
+        manualAcrossPolicy.documentKind = .nonInvoice
+        try JSONEncoder().encode([manualAcrossPolicy]).write(to: directory.appendingPathComponent("invoices.json"))
+        store.configure(directory: directory)
+        try await Task.sleep(for: .milliseconds(20))
+        precondition(store.pendingIDs.isEmpty && store.invoices[0].manuallyImported == true && store.invoices[0].isAccepted && store.excludedCount == 0,
+                     "User-provided invoices are not invalidated by a future local policy change")
+        var refreshed = oldUnknown
+        refreshed.amount = nil
+        try JSONEncoder().encode([refreshed]).write(to: directory.appendingPathComponent("invoices.json"))
+        store.configure(directory: directory)
+        refreshed.manuallyImported = true
+        refreshed.documentKind = .invoice
+        refreshed.documentReason = "手动导入，按用户提供的发票保留。"
+        refreshed.amount = 39
+        refreshed.warning = nil
+        try JSONEncoder().encode([refreshed]).write(to: directory.appendingPathComponent("invoices.json"))
+        try store.refreshFromDisk()
+        precondition(store.invoices.count == 1 && store.invoices[0].isAccepted && store.invoices[0].amount == 39 && store.invoices[0].warning == nil,
+                     "Disk upgrades of an existing invoice must be reflected without duplicating its row")
+        store.updateAmount("88", for: refreshed.id)
+        refreshed.amount = 99
+        try JSONEncoder().encode([refreshed]).write(to: directory.appendingPathComponent("invoices.json"))
+        try store.refreshFromDisk()
+        precondition(store.invoices[0].amount == 88, "Refreshing manual trust cannot overwrite an existing user amount")
+        store.updateAmount("", for: refreshed.id)
+        try store.refreshFromDisk()
+        precondition(store.invoices[0].amount == nil && store.invoices[0].warning != nil,
+                     "Refreshing manual trust cannot refill a deliberately cleared amount")
         print("Invoice confirmation and unified export checks passed; temporary data retained at \(directory.path)")
     }
 }

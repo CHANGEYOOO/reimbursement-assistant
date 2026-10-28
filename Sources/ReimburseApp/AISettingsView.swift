@@ -18,7 +18,7 @@ struct AISettingsView: View {
                     .disabled(!state.enabled || state.testing)
                 Text("默认关闭。开启并保存后，新导入及已有的待确认附件会自动接续，无需逐张点选；仅本地规则无法判断的发票附件会发送提取文字和页面预览到当前配置的 API，可能包含姓名、税号、账号、地址等个人及企业信息。本地已明确分类的文件不会发送。请使用支持图像输入的模型；不支持时仍保留待确认。")
                     .font(.callout).foregroundStyle(.secondary)
-                Text("发票 AI 判断后还需本地复核；证据不足、结果矛盾或调用失败时不会自动确认为发票，也不会删除文件。")
+                Text("本地待确认时采用 AI 的明确识别结果，不再被本地字段复核挡回；AI 自身不确定、返回矛盾或调用失败时保留待确认，不删除文件。手动导入不调用票种判断 AI。")
                     .font(.caption).foregroundStyle(.secondary)
                 Button(state.clearingInvoiceCache ? "正在清除…" : "清除发票 AI 识别缓存") {
                     Task { await state.clearInvoiceCache() }

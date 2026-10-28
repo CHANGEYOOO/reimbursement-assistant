@@ -15,11 +15,12 @@ public struct Invoice: Identifiable, Codable, Sendable {
     public var documentKind: InvoiceDocumentKind? = nil
     public var documentReason: String? = nil
     public var manuallyConfirmed: Bool? = nil
+    public var manuallyImported: Bool? = nil
     public var documentPolicyRevision: Int? = nil
 
     public var isAccepted: Bool {
-        documentPolicyRevision == InvoiceDocumentClassifier.policyRevision
-            && (documentKind == .invoice || (documentKind == .unknown && manuallyConfirmed == true))
+        manuallyImported == true || (documentPolicyRevision == InvoiceDocumentClassifier.policyRevision
+            && (documentKind == .invoice || (documentKind == .unknown && manuallyConfirmed == true)))
     }
 }
 
@@ -36,7 +37,7 @@ public struct Invoice: Identifiable, Codable, Sendable {
     public init() {}
 
     public var acceptedInvoices: [Invoice] { invoices.filter(\.isAccepted) }
-    public var excludedCount: Int { invoices.filter { $0.documentKind == .nonInvoice && !pendingIDs.contains($0.id) }.count }
+    public var excludedCount: Int { invoices.filter { !$0.isAccepted && $0.documentKind == .nonInvoice && !pendingIDs.contains($0.id) }.count }
     public var unknownCount: Int { invoices.filter { !$0.isAccepted && $0.documentKind != .nonInvoice && !pendingIDs.contains($0.id) }.count }
 
     public var total: Decimal {
@@ -79,6 +80,21 @@ public struct Invoice: Identifiable, Codable, Sendable {
         let metadata = directory.appendingPathComponent("invoices.json")
         guard FileManager.default.fileExists(atPath: metadata.path) else { return }
         let stored = try JSONDecoder().decode([Invoice].self, from: Data(contentsOf: metadata))
+        for incoming in stored where incoming.manuallyImported == true {
+            guard let index = invoices.firstIndex(where: { $0.id == incoming.id }) else { continue }
+            invoices[index].manuallyImported = true
+            invoices[index].documentKind = incoming.documentKind
+            invoices[index].documentReason = incoming.documentReason
+            invoices[index].documentPolicyRevision = incoming.documentPolicyRevision
+            if invoices[index].amount == nil, amountRevisions[incoming.id, default: 0] == 0 {
+                invoices[index].amount = incoming.amount
+            }
+            let hasAmount = (invoices[index].amount ?? .zero) > 0
+            let amountWarnings = ["未识别到价税合计，请手动填写。", "请填写大于 0 的发票金额。"]
+            invoices[index].warning = hasAmount
+                ? (amountWarnings.contains(incoming.warning ?? "") ? nil : incoming.warning)
+                : incoming.warning ?? "请填写大于 0 的发票金额。"
+        }
         let existing = Set(invoices.map(\.id))
         invoices += stored.filter { !existing.contains($0.id) }
         validateLegacyInvoices()
@@ -106,54 +122,54 @@ public struct Invoice: Identifiable, Codable, Sendable {
         let currentDirectory = directory
         let id = UUID()
         pendingIDs.insert(id)
-        defer { pendingIDs.remove(id) }
+        defer { if directory == currentDirectory { pendingIDs.remove(id) } }
         do {
             guard Self.isSupported(url) else {
                 lastError = "不支持的发票格式：\(url.lastPathComponent)"
                 return
             }
-            let input = try await Task.detached(priority: .userInitiated) {
-                (try Data(contentsOf: url), InvoiceDocumentClassifier.classify(at: url, text: "", filename: url.lastPathComponent))
-            }.value
+            let data = try await Task.detached(priority: .userInitiated) { try Data(contentsOf: url) }.value
             guard directory == currentDirectory else { return }
-            let hash = SHA256.hash(data: input.0).map { String(format: "%02x", $0) }.joined()
-            guard !invoices.contains(where: { $0.fingerprint == hash }) else {
-                lastError = "已跳过重复发票：\(url.lastPathComponent)"
-                return
+            let hash = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+            let targetID: UUID
+            let reason = "手动导入，按用户提供的发票保留。"
+            if let index = invoices.firstIndex(where: { $0.fingerprint == hash }) {
+                targetID = invoices[index].id
+                let stored = sourceURL(for: invoices[index])
+                if !FileManager.default.fileExists(atPath: stored.path) { try data.write(to: stored, options: .atomic) }
+                invoices[index].manuallyImported = true
+                invoices[index].documentKind = .invoice
+                invoices[index].documentReason = reason
+                invoices[index].documentPolicyRevision = InvoiceDocumentClassifier.policyRevision
+            } else {
+                targetID = id
+                let filename = id.uuidString + "." + url.pathExtension.lowercased()
+                try data.write(to: filesDirectory.appendingPathComponent(filename), options: .atomic)
+                invoices.append(Invoice(id: id, storedFilename: filename, originalFilename: url.lastPathComponent,
+                    fingerprint: hash, amount: nil, warning: "正在识别发票金额…", documentKind: .invoice,
+                    documentReason: reason, manuallyImported: true, documentPolicyRevision: InvoiceDocumentClassifier.policyRevision))
             }
-            var classification = await reviewWithAI(at: url, local: input.1, id: id)
-            guard directory == currentDirectory else { return }
-            if input.1.kind == .unknown && classification.kind != .unknown {
-                let originalData = input.0
-                let unchanged = await Task.detached { (try? Data(contentsOf: url)) == originalData }.value
-                if !unchanged { classification = (.unknown, "识别期间源文件已变化，保留原附件待人工确认。") }
-            }
-            let reviewed = classification
+            try save()
+            let amountRevision = amountRevisions[targetID, default: 0]
+            let stored = sourceURL(for: invoices.first { $0.id == targetID }!)
             let amount = await Task.detached(priority: .userInitiated) {
-                let text = reviewed.kind == .invoice ? ((try? Self.invoiceText(at: url)) ?? "") : ""
-                return reviewed.kind == .invoice
-                    ? Self.amountInFilename(url.deletingPathExtension().lastPathComponent)
-                        ?? (try? InvoiceAmountRecognition.total(at: url, text: text)) : nil
+                Self.amountInFilename(url.deletingPathExtension().lastPathComponent)
+                    ?? (try? Self.recognizeTotal(at: stored))
             }.value
-            guard directory == currentDirectory else { return }
-            guard !invoices.contains(where: { $0.fingerprint == hash }) else { return }
-            let filename = id.uuidString + "." + url.pathExtension.lowercased()
-            try input.0.write(to: filesDirectory.appendingPathComponent(filename), options: .atomic)
-            invoices.append(Invoice(id: id, storedFilename: filename,
-                                    originalFilename: url.lastPathComponent, fingerprint: hash,
-                                    amount: amount,
-                                    warning: classification.kind == .invoice ? (amount == nil ? "未识别到价税合计，请手动填写。" : nil) : classification.reason,
-                                    documentKind: classification.kind, documentReason: classification.reason,
-                                    documentPolicyRevision: InvoiceDocumentClassifier.policyRevision))
+            guard directory == currentDirectory, let index = invoices.firstIndex(where: { $0.id == targetID }) else { return }
+            if amountRevisions[targetID, default: 0] == amountRevision, (invoices[index].amount ?? .zero) <= 0 {
+                invoices[index].amount = amount
+            }
+            invoices[index].warning = (invoices[index].amount ?? .zero) > 0 ? nil : "未识别到价税合计，请手动填写。"
             try save()
         } catch {
-            lastError = "导入发票失败：\(error.localizedDescription)"
+            if directory == currentDirectory { lastError = "导入发票失败：\(error.localizedDescription)" }
         }
     }
 
     private func validateLegacyInvoices() {
         guard let currentDirectory = directory else { return }
-        for invoice in invoices where invoice.documentPolicyRevision != InvoiceDocumentClassifier.policyRevision && !pendingIDs.contains(invoice.id) {
+        for invoice in invoices where invoice.manuallyImported != true && invoice.documentPolicyRevision != InvoiceDocumentClassifier.policyRevision && !pendingIDs.contains(invoice.id) {
             pendingIDs.insert(invoice.id)
             let source = sourceURL(for: invoice)
             let amountRevision = amountRevisions[invoice.id, default: 0]
@@ -162,7 +178,7 @@ public struct Invoice: Identifiable, Codable, Sendable {
                 let local = await Task.detached(priority: .utility) {
                     InvoiceDocumentClassifier.classify(at: source, text: "", filename: invoice.originalFilename)
                 }.value
-                guard directory == currentDirectory else { return }
+                guard directory == currentDirectory, invoices.first(where: { $0.id == invoice.id })?.manuallyImported != true else { return }
                 let result = invoice.manuallyConfirmed == true ? local : await reviewWithAI(at: source, local: local, id: invoice.id, filename: invoice.originalFilename)
                 guard directory == currentDirectory else { return }
                 let amount = await Task.detached(priority: .utility) {
@@ -171,7 +187,7 @@ public struct Invoice: Identifiable, Codable, Sendable {
                     return Self.amountInFilename(invoice.originalFilename) ?? (try? InvoiceAmountRecognition.total(at: source, text: text))
                 }.value
                 guard directory == currentDirectory,
-                      let index = invoices.firstIndex(where: { $0.id == invoice.id }) else { return }
+                      let index = invoices.firstIndex(where: { $0.id == invoice.id }), invoices[index].manuallyImported != true else { return }
                 if amountRevisions[invoice.id, default: 0] == amountRevision, (invoices[index].amount ?? .zero) <= 0, let amount {
                     invoices[index].amount = amount
                 }
@@ -233,7 +249,7 @@ public struct Invoice: Identifiable, Codable, Sendable {
 
     public func automaticallyAssistUnresolvedInvoices() async {
         guard AIConfiguration.enabled, AIConfiguration.invoiceFallbackEnabled, let currentDirectory = directory else { return }
-        let ids = invoices.filter { $0.documentKind == .unknown && $0.manuallyConfirmed != true && !pendingIDs.contains($0.id) }.map(\.id)
+        let ids = invoices.filter { $0.documentKind == .unknown && $0.manuallyConfirmed != true && $0.manuallyImported != true && !pendingIDs.contains($0.id) }.map(\.id)
         for id in ids {
             guard !Task.isCancelled, directory == currentDirectory,
                   AIConfiguration.enabled, AIConfiguration.invoiceFallbackEnabled else { return }
@@ -246,7 +262,7 @@ public struct Invoice: Identifiable, Codable, Sendable {
     public func rerecognize(_ id: UUID) async throws {
         guard let currentDirectory = directory,
               let invoice = invoices.first(where: { $0.id == id }),
-              invoice.documentKind == .unknown, invoice.manuallyConfirmed != true,
+              invoice.documentKind == .unknown, invoice.manuallyConfirmed != true, invoice.manuallyImported != true,
               !pendingIDs.contains(id) else { return }
         let source = sourceURL(for: invoice)
         guard FileManager.default.fileExists(atPath: source.path) else { throw CocoaError(.fileNoSuchFile) }
@@ -264,7 +280,7 @@ public struct Invoice: Identifiable, Codable, Sendable {
             let text = (try? Self.invoiceText(at: source)) ?? ""
             return Self.amountInFilename(invoice.originalFilename) ?? (try? InvoiceAmountRecognition.total(at: source, text: text))
         }.value
-        guard directory == currentDirectory, let index = invoices.firstIndex(where: { $0.id == id }) else { return }
+        guard directory == currentDirectory, let index = invoices.firstIndex(where: { $0.id == id }), invoices[index].manuallyImported != true else { return }
         if amountRevisions[id, default: 0] == amountRevision, invoices[index].amount == nil {
             invoices[index].amount = amount
         }

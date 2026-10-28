@@ -700,7 +700,7 @@ private struct InvoiceRow: View {
             Button(invoice.originalFilename) { preview(store.sourceURL(for: invoice)) }
                 .frame(maxWidth: .infinity, alignment: .leading)
             if store.pendingIDs.contains(invoice.id) { ProgressView() }
-            Text(invoice.isAccepted ? (invoice.manuallyConfirmed == true ? "电子发票（人工确认）" : "电子发票") : invoice.documentKind == .nonInvoice ? "非发票附件" : "待确认")
+            Text(invoice.isAccepted ? (invoice.manuallyImported == true ? "电子发票（手动导入）" : invoice.manuallyConfirmed == true ? "电子发票（人工确认）" : "电子发票") : invoice.documentKind == .nonInvoice ? "非发票附件" : "待确认")
                 .font(.caption).foregroundStyle(invoice.isAccepted ? Color.secondary : Color.orange)
             TextField("价税合计", text: Binding(
                 get: { amountDraft.text },

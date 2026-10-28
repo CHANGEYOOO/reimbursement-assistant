@@ -22,11 +22,15 @@ public struct InboxInvoice: Identifiable, Codable, Sendable {
     public var documentKind: InvoiceDocumentKind? = nil
     public var documentReason: String? = nil
     public var manuallyConfirmed: Bool? = nil
+    public var manuallyImported: Bool? = nil
     public var documentPolicyRevision: Int? = nil
     public var autoDownloadPending: Bool? = nil
 
+    public var isManuallyImported: Bool {
+        manuallyImported == true || (manuallyImported == nil && source == "手动导入" && mailID == nil && remote == nil)
+    }
     public var isAcceptedInvoice: Bool {
-        documentPolicyRevision == InvoiceDocumentClassifier.policyRevision && (documentKind == .invoice || (documentKind == .unknown && manuallyConfirmed == true))
+        isManuallyImported || documentPolicyRevision == InvoiceDocumentClassifier.policyRevision && (documentKind == .invoice || (documentKind == .unknown && manuallyConfirmed == true))
     }
 }
 
@@ -83,7 +87,7 @@ private struct InboxSnapshot: Codable {
         for url in urls {
             do {
                 let data = try await Task.detached { try Data(contentsOf: url) }.value
-                try await importData(data, filename: url.lastPathComponent, receivedAt: receivedAt, source: source, mailID: nil)
+                try await importData(data, filename: url.lastPathComponent, receivedAt: receivedAt, source: source, mailID: nil, manuallyImported: true)
             } catch { lastError = "导入发票失败：\(error.localizedDescription)"; return }
         }
     }
@@ -244,7 +248,7 @@ private struct InboxSnapshot: Codable {
         do { try persist(updated); items = updated }
         catch { lastError = error.localizedDescription; return }
         let automaticAI = AIConfiguration.enabled && AIConfiguration.invoiceFallbackEnabled
-        let ids = items.filter { isDownloaded($0) && ($0.documentPolicyRevision != InvoiceDocumentClassifier.policyRevision || ($0.isAcceptedInvoice && (($0.amount ?? .zero) <= 0 || $0.buyerTitle.isEmpty)) || (automaticAI && $0.documentKind == .unknown && $0.manuallyConfirmed != true)) }.map(\.id)
+        let ids = items.filter { isDownloaded($0) && ($0.documentPolicyRevision != InvoiceDocumentClassifier.policyRevision || ($0.isAcceptedInvoice && (($0.amount ?? .zero) <= 0 || $0.buyerTitle.isEmpty)) || ($0.isManuallyImported && ($0.manuallyImported != true || $0.documentKind != .invoice)) || (automaticAI && !$0.isManuallyImported && $0.documentKind == .unknown && $0.manuallyConfirmed != true)) }.map(\.id)
         for id in ids {
             guard !Task.isCancelled else { return }
             guard let item = items.first(where: { $0.id == id }), isDownloaded(item), !pendingIDs.contains(id) else { continue }
@@ -257,27 +261,36 @@ private struct InboxSnapshot: Codable {
         }
     }
 
-    private func importData(_ data: Data, filename: String, receivedAt: Date, source: String, mailID: String?) async throws {
+    private func importData(_ data: Data, filename: String, receivedAt: Date, source: String, mailID: String?, manuallyImported: Bool = false) async throws {
         guard !data.isEmpty, data.count <= 40 * 1024 * 1024 else { throw failure("发票文件为空或超过 40 MB。") }
         let name = URL(fileURLWithPath: filename).lastPathComponent
         let ext = URL(fileURLWithPath: name).pathExtension.lowercased()
         if ext == "zip" {
             let attachments = try await Task.detached { try Self.readArchive(data) }.value
             for attachment in attachments {
-                try await importData(attachment.data, filename: attachment.name, receivedAt: receivedAt, source: source, mailID: mailID)
+                try await importData(attachment.data, filename: attachment.name, receivedAt: receivedAt, source: source, mailID: mailID, manuallyImported: manuallyImported)
             }
             return
         }
         guard InvoiceDocumentClassifier.supportedExtensions.contains(ext) else { throw failure("不支持的发票格式：\(name)") }
         let fingerprint = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
         if let existing = items.first(where: { $0.fingerprint == fingerprint }) {
-            guard existing.documentPolicyRevision != InvoiceDocumentClassifier.policyRevision else { return }
             guard !pendingIDs.contains(existing.id) else { throw failure("附件正在识别，请稍后重试。") }
             let destination = sourceURL(for: existing)
-            if !isDownloaded(existing) { try data.write(to: destination, options: .atomic) }
+            let missing = !isDownloaded(existing)
+            if missing { try data.write(to: destination, options: .atomic) }
+            if manuallyImported, let index = items.firstIndex(where: { $0.id == existing.id }) {
+                var updated = items
+                updated[index].manuallyImported = true
+                updated[index].documentKind = .invoice
+                updated[index].documentReason = "手动导入，按用户提供的发票保留。"
+                updated[index].documentPolicyRevision = InvoiceDocumentClassifier.policyRevision
+                try persist(updated); items = updated
+            }
+            guard manuallyImported || missing || existing.documentPolicyRevision != InvoiceDocumentClassifier.policyRevision else { return }
             pendingIDs.insert(existing.id)
             defer { pendingIDs.remove(existing.id); onCacheChanged?([]) }
-            try await recognize(existing.id, at: destination, namedAmount: existing.amount)
+            try await recognize(existing.id, at: destination, namedAmount: existing.amount, metadataOnly: (existing.amount ?? .zero) > 0)
             return
         }
         let id = UUID()
@@ -289,7 +302,7 @@ private struct InboxSnapshot: Codable {
         updated.append(InboxInvoice(id: id, storedFilename: stored, originalFilename: name, fingerprint: fingerprint,
                                     amount: amount, warning: "正在识别金额和抬头…", receivedAt: receivedAt,
                                     buyerTitle: "", sellerTitle: "", itemDescription: "", source: source, mailID: mailID,
-                                    projectID: nil, projectInvoiceID: nil))
+                                    projectID: nil, projectInvoiceID: nil, manuallyImported: manuallyImported))
         try persist(updated)
         items = updated
         pendingIDs.insert(id)
@@ -298,13 +311,20 @@ private struct InboxSnapshot: Codable {
     }
 
     private func recognize(_ id: UUID, at destination: URL, namedAmount: Decimal?, metadataOnly: Bool = false) async throws {
-        let filename = items.first(where: { $0.id == id })?.originalFilename ?? destination.lastPathComponent
-        let local = await Task.detached(priority: .userInitiated) {
-            InvoiceDocumentClassifier.classify(at: destination, text: "", filename: filename)
-        }.value
+        guard let initial = items.first(where: { $0.id == id }) else { return }
+        let filename = initial.originalFilename
+        let local: (kind: InvoiceDocumentKind, reason: String)
+        if initial.isManuallyImported { local = (.invoice, "手动导入，按用户提供的发票保留。") }
+        else {
+            local = await Task.detached(priority: .userInitiated) {
+                InvoiceDocumentClassifier.classify(at: destination, text: "", filename: filename)
+            }.value
+        }
         guard let current = items.first(where: { $0.id == id }) else { return }
         let classification: (kind: InvoiceDocumentKind, reason: String)
-        if current.manuallyConfirmed == true {
+        if current.isManuallyImported {
+            classification = (.invoice, "手动导入，按用户提供的发票保留。")
+        } else if current.manuallyConfirmed == true {
             classification = local
         } else {
             classification = await InvoiceAIFallback.reviewIfNeeded(at: destination, local: local, willUpload: {
@@ -332,7 +352,9 @@ private struct InboxSnapshot: Codable {
         if !metadataOnly || updated[index].sellerTitle.isEmpty { updated[index].sellerTitle = result.seller }
         if !metadataOnly || updated[index].itemDescription.isEmpty { updated[index].itemDescription = result.item }
         if !metadataOnly { updated[index].warning = classification.kind == .invoice && (updated[index].amount ?? .zero) <= 0 ? "未识别到价税合计，请手动填写。" : nil }
+        else if updated[index].warning == "正在识别金额和抬头…" { updated[index].warning = nil }
         if updated[index].documentPolicyRevision != InvoiceDocumentClassifier.policyRevision { updated[index].manuallyConfirmed = nil }
+        if initial.isManuallyImported { updated[index].manuallyImported = true }
         updated[index].documentKind = classification.kind
         updated[index].documentReason = classification.reason
         updated[index].documentPolicyRevision = InvoiceDocumentClassifier.policyRevision
@@ -414,15 +436,24 @@ private struct InboxSnapshot: Codable {
         var updated = items
         for item in selected {
             let projectInvoice: Invoice
-            if let existing = projectInvoices.first(where: { $0.fingerprint == item.fingerprint }) {
-                projectInvoice = existing
+            if let index = projectInvoices.firstIndex(where: { $0.fingerprint == item.fingerprint }) {
+                if item.isManuallyImported {
+                    let oldReason = projectInvoices[index].documentReason
+                    projectInvoices[index].manuallyImported = true
+                    projectInvoices[index].documentKind = .invoice
+                    projectInvoices[index].documentReason = "手动导入，按用户提供的发票保留。"
+                    projectInvoices[index].documentPolicyRevision = InvoiceDocumentClassifier.policyRevision
+                    if projectInvoices[index].amount == nil { projectInvoices[index].amount = item.amount }
+                    if projectInvoices[index].warning == oldReason { projectInvoices[index].warning = (projectInvoices[index].amount ?? .zero) > 0 ? nil : "请填写发票金额。" }
+                }
+                projectInvoice = projectInvoices[index]
             } else {
                 let id = UUID()
                 let stored = id.uuidString + "." + URL(fileURLWithPath: item.storedFilename).pathExtension
                 try FileManager.default.copyItem(at: sourceURL(for: item), to: projectFiles.appendingPathComponent(stored))
                 projectInvoice = Invoice(id: id, storedFilename: stored, originalFilename: item.originalFilename,
                                          fingerprint: item.fingerprint, amount: item.amount, warning: item.warning,
-                                         documentKind: item.documentKind, documentReason: item.documentReason, manuallyConfirmed: item.manuallyConfirmed, documentPolicyRevision: InvoiceDocumentClassifier.policyRevision)
+                                         documentKind: item.documentKind, documentReason: item.documentReason, manuallyConfirmed: item.manuallyConfirmed, manuallyImported: item.isManuallyImported, documentPolicyRevision: InvoiceDocumentClassifier.policyRevision)
                 projectInvoices.append(projectInvoice)
             }
             if let index = updated.firstIndex(where: { $0.id == item.id }) {

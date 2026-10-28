@@ -29,7 +29,6 @@ private actor InvoiceAICounter {
         precondition(InvoiceAIFallback.permits(local: .unknown, enabled: true, uploadAllowed: true))
         let configuration = try AIRequestConfiguration(endpoint: URL(string: "https://example.invalid/chat/completions")!, model: "test-vision", apiKey: "offline-dummy")
         let verified = InvoiceAIInput(text: "已验证的发票字段", images: [Data([1, 2])], verification: .invoice, verificationReason: "", verifiedType: .digitalGeneral)
-        let missing = InvoiceAIInput(text: "缺字段", images: [Data([1, 2])], verification: .unknown, verificationReason: "缺购买方税号")
         let invoice = """
         电子发票（普通发票）
         发票号码：12345678901234567890
@@ -52,18 +51,14 @@ private actor InvoiceAICounter {
         let special = "电子发票普通发票说明\n" + invoice.replacingOccurrences(of: "（普通发票）", with: "（增值税专用发票）")
         precondition(InvoiceAIInput.verify(native: special, recognized: "", embedded: ([], nil), pageCount: 1).type == .digitalSpecial, "Only the actual anchored invoice title determines type")
         let report = try InvoiceAIRequest.decode(response(), status: 200)
-        precondition(InvoiceAIRequest.decision(report: report, input: verified).kind == .invoice)
-        precondition(InvoiceAIRequest.decision(report: report, input: missing).kind == .unknown)
+        precondition(InvoiceAIRequest.decision(report: report).kind == .invoice)
         let wrongType = try InvoiceAIRequest.decode(response(type: "digital_special"), status: 200)
-        precondition(InvoiceAIRequest.decision(report: wrongType, input: verified).kind == .unknown, "AI and local invoice type must agree")
+        precondition(InvoiceAIRequest.decision(report: wrongType).kind == .invoice, "Clear AI invoice type is authoritative")
         let nonInvoice = try InvoiceAIRequest.decode(response(type: "itinerary", target: false), status: 200)
-        precondition(InvoiceAIRequest.decision(report: nonInvoice, input: missing).kind == .nonInvoice)
-        let conflictingInput = InvoiceAIInput(text: "存在冲突", images: [Data([1, 2])], verification: .unknown, verificationReason: "OCR矛盾", hasConflict: true)
-        precondition(InvoiceAIRequest.decision(report: nonInvoice, input: conflictingInput).kind == .unknown, "Contradictions also block negative AI classification")
+        precondition(InvoiceAIRequest.decision(report: nonInvoice).kind == .nonInvoice, "Clear AI results supersede inconclusive local checks")
 
-        precondition(InvoiceAIRequest.decision(report: nonInvoice, input: verified).kind == .unknown, "Conflicting local and AI decisions stay pending")
         let unsure = try InvoiceAIRequest.decode(response(type: "uncertain", target: nil, certainty: "uncertain", uncertainty: "票面模糊"), status: 200)
-        precondition(InvoiceAIRequest.decision(report: unsure, input: verified).kind == .unknown)
+        precondition(InvoiceAIRequest.decision(report: unsure).kind == .unknown)
         for bad in [try response(type: "itinerary", target: true), try response(target: true, uncertainty: "缺字段"), Data("bad JSON".utf8)] {
             do { _ = try InvoiceAIRequest.decode(bad, status: 200); preconditionFailure("Contradictory or malformed AI output cannot pass") } catch {}
         }
@@ -94,7 +89,7 @@ private actor InvoiceAICounter {
         async let first = service.review(at: file, configuration: configuration)
         async let second = service.review(at: file, configuration: configuration)
         let pair = await (first, second)
-        precondition(pair.0.kind == .unknown && pair.1.kind == .unknown, "AI alone cannot confirm a blank invoice")
+        precondition(pair.0.kind == .invoice && pair.1.kind == .invoice, "A clear AI invoice result is adopted without a second local gate")
         let firstCalls = await counter.calls
         precondition(firstCalls == 1, "Concurrent identical files share one request; calls=\(firstCalls); result=\(pair.0.reason)")
         _ = await service.review(at: file, configuration: configuration)
@@ -103,8 +98,12 @@ private actor InvoiceAICounter {
         _ = await service.review(at: renamed, configuration: configuration)
         let repeatedCalls = await counter.calls
         precondition(repeatedCalls == 1, "Repeated and renamed content must hit the cache")
+        var oldCache = try JSONSerialization.jsonObject(with: Data(contentsOf: cache)) as! [String: [String: Any]]
+        for key in oldCache.keys { oldCache[key]!["kind"] = "unknown" }
+        try JSONSerialization.data(withJSONObject: oldCache).write(to: cache, options: .atomic)
         let restored = InvoiceAIService(cacheURL: cache) { _ in await counter.increment(); return (answer, 200) }
-        _ = await restored.review(at: file, configuration: configuration)
+        let restoredResult = await restored.review(at: file, configuration: configuration)
+        precondition(restoredResult.kind == .invoice, "Previously blocked AI-positive cached reports are adopted without another request")
         let restoredCalls = await counter.calls
         precondition(restoredCalls == 1, "Cache survives restart")
         let another = try AIRequestConfiguration(endpoint: configuration.endpoint, model: "other-vision", apiKey: configuration.apiKey)
@@ -143,7 +142,7 @@ private actor InvoiceAICounter {
         precondition(permissions.intValue == 0o600, "AI result cache must remain private to the current user")
         let stored = try String(contentsOf: cache, encoding: .utf8)
         precondition(!stored.contains("offline-dummy") && !stored.contains("data:image"), "Cache must not contain secrets or uploaded images")
-        print("Invoice AI fallback checks passed: privacy gates, multimodal request, strict JSON, field verification, contradictions, persistent cache, deduplication, model changes, failures and unsupported files. Offline fixtures retained: \(root.path)")
+        print("Invoice AI fallback checks passed: privacy gates, multimodal request, strict JSON, authoritative AI results, contradictory AI output, persistent cache, deduplication, model changes, failures and unsupported files. Offline fixtures retained: \(root.path)")
     }
 }
 #endif

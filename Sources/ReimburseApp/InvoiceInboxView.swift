@@ -23,6 +23,7 @@ import UniformTypeIdentifiers
     @Published var busy = false
     @Published var dropTarget = false
     @Published var documentFilter = "电子发票"
+    @Published var importStatus = ""
     @Published var deleteIDs: Set<UUID> = []
     @Published var confirmingDelete = false
 }
@@ -82,12 +83,13 @@ struct InvoiceInboxView: View {
                 Button("导入发票", action: importFiles)
             }
             if !syncStatus.isEmpty { Text(syncStatus).font(.caption).foregroundStyle(.secondary) }
+            if !controls.importStatus.isEmpty { Text(controls.importStatus).font(.caption).foregroundStyle(.secondary) }
             if let status = inbox.aiStatus {
                 ScrollView { Text(status).font(.caption).foregroundStyle(.secondary).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }
                     .frame(maxHeight: 72)
             }
             filters
-            Text("本地检查电子发票；可疑附件保留在“待确认”，明确的行程单、明细单等归入“非发票附件”，不计入项目发票。")
+            Text("手动导入直接按发票保留，仅识别金额和抬头；邮箱附件自动筛选，本地无法判断时按设置自动交给 AI。")
                 .font(.caption).foregroundStyle(.secondary)
             HStack {
                 Toggle("全选当前结果", isOn: Binding(get: { !selectable.isEmpty && selectable.isSubset(of: controls.selected) }, set: {
@@ -216,7 +218,7 @@ struct InvoiceInboxView: View {
                 Text(item.amount.map { "¥" + $0.formatted(.number.precision(.fractionLength(2))) } ?? (downloaded ? "金额待填写" : "下载后识别金额"))
                     .font(.title3.weight(.semibold)).monospacedDigit()
             }
-            Text(item.isAcceptedInvoice ? (item.manuallyConfirmed == true ? "电子发票（人工确认）" : "电子发票") : !downloaded ? "待下载自动识别" : item.documentKind == .nonInvoice ? "非发票附件" : "待确认：未能可靠判断")
+            Text(item.isAcceptedInvoice ? (item.isManuallyImported ? "电子发票（手动导入）" : item.manuallyConfirmed == true ? "电子发票（人工确认）" : "电子发票") : !downloaded ? "待下载自动识别" : item.documentKind == .nonInvoice ? "非发票附件" : "待确认：未能可靠判断")
                 .font(.caption).foregroundStyle(item.isAcceptedInvoice ? Color.secondary : Color.orange)
             if let reason = item.documentReason { Text(reason).font(.caption).foregroundStyle(.secondary) }
             Text("购买方：" + (item.buyerTitle.isEmpty ? (downloaded ? "抬头未知" : "下载后识别抬头") : item.buyerTitle))
@@ -365,14 +367,23 @@ struct InvoiceInboxView: View {
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = true
         panel.allowedContentTypes = [.image, .pdf, .zip, .xml, UTType(filenameExtension: "ofd") ?? .data]
-        if panel.runModal() == .OK { let urls = panel.urls; Task { await inbox.importFiles(urls) } }
+        if panel.runModal() == .OK { let urls = panel.urls; Task { await importManually(urls) } }
+    }
+    private func importManually(_ urls: [URL]) async {
+        controls.documentFilter = "电子发票"
+        controls.buyer = "全部抬头"
+        controls.assignment = "全部状态"
+        controls.dateFilter = false
+        controls.importStatus = "正在导入并读取金额、抬头…"
+        await inbox.importFiles(urls)
+        controls.importStatus = inbox.lastError == nil ? "导入完成，手动文件已按发票保留；重复文件沿用原记录。" : "导入未全部完成，请查看错误提示。"
     }
     private func dropped(_ providers: [NSItemProvider]) -> Bool {
         let matches = providers.filter { $0.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) }
         for provider in matches {
             provider.loadDataRepresentation(forTypeIdentifier: UTType.fileURL.identifier) { data, _ in
                 guard let data, let url = URL(dataRepresentation: data, relativeTo: nil) else { return }
-                Task { @MainActor in await inbox.importFiles([url]) }
+                Task { @MainActor in await importManually([url]) }
             }
         }
         return !matches.isEmpty
