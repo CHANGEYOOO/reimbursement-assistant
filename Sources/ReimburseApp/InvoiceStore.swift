@@ -63,6 +63,10 @@ public struct Invoice: Identifiable, Codable, Sendable {
             invoices = FileManager.default.fileExists(atPath: metadata.path)
                 ? try JSONDecoder().decode([Invoice].self, from: Data(contentsOf: metadata)) : []
             validateLegacyInvoices()
+            Task {
+                guard self.directory == directory else { return }
+                await automaticallyAssistUnresolvedInvoices()
+            }
         } catch {
             invoices = []
             self.directory = nil
@@ -78,6 +82,10 @@ public struct Invoice: Identifiable, Codable, Sendable {
         let existing = Set(invoices.map(\.id))
         invoices += stored.filter { !existing.contains($0.id) }
         validateLegacyInvoices()
+        Task {
+            guard self.directory == directory else { return }
+            await automaticallyAssistUnresolvedInvoices()
+        }
     }
 
     public func sourceURL(for invoice: Invoice) -> URL {
@@ -148,14 +156,25 @@ public struct Invoice: Identifiable, Codable, Sendable {
         for invoice in invoices where invoice.documentPolicyRevision != InvoiceDocumentClassifier.policyRevision && !pendingIDs.contains(invoice.id) {
             pendingIDs.insert(invoice.id)
             let source = sourceURL(for: invoice)
+            let amountRevision = amountRevisions[invoice.id, default: 0]
             Task {
+                defer { if directory == currentDirectory { pendingIDs.remove(invoice.id) } }
                 let local = await Task.detached(priority: .utility) {
                     InvoiceDocumentClassifier.classify(at: source, text: "", filename: invoice.originalFilename)
                 }.value
                 guard directory == currentDirectory else { return }
                 let result = invoice.manuallyConfirmed == true ? local : await reviewWithAI(at: source, local: local, id: invoice.id, filename: invoice.originalFilename)
+                guard directory == currentDirectory else { return }
+                let amount = await Task.detached(priority: .utility) {
+                    guard result.kind == .invoice, (invoice.amount ?? .zero) <= 0 else { return Optional<Decimal>.none }
+                    let text = (try? Self.invoiceText(at: source)) ?? ""
+                    return Self.amountInFilename(invoice.originalFilename) ?? (try? InvoiceAmountRecognition.total(at: source, text: text))
+                }.value
                 guard directory == currentDirectory,
                       let index = invoices.firstIndex(where: { $0.id == invoice.id }) else { return }
+                if amountRevisions[invoice.id, default: 0] == amountRevision, (invoices[index].amount ?? .zero) <= 0, let amount {
+                    invoices[index].amount = amount
+                }
                 let previousReason = invoices[index].documentReason
                 invoices[index].documentKind = result.kind
                 invoices[index].documentReason = result.reason
@@ -163,19 +182,20 @@ public struct Invoice: Identifiable, Codable, Sendable {
                 if result.kind != .invoice { invoices[index].warning = result.reason }
                 else if (invoices[index].amount ?? .zero) <= 0 {
                     invoices[index].warning = "请填写大于 0 的发票金额。"
-                } else if invoices[index].warning == previousReason {
+                } else if invoices[index].warning == previousReason || (amount != nil && ["未识别到价税合计，请手动填写。", "请填写大于 0 的发票金额。"].contains(invoices[index].warning ?? "")) {
                     invoices[index].warning = nil
                 }
                 invoices[index].documentPolicyRevision = InvoiceDocumentClassifier.policyRevision
-                pendingIDs.remove(invoice.id)
                 do { try save() } catch { lastError = "保存发票识别结果失败：\(error.localizedDescription)" }
             }
         }
     }
 
     private func reviewWithAI(at url: URL, local: (kind: InvoiceDocumentKind, reason: String), id: UUID, filename: String? = nil) async -> (kind: InvoiceDocumentKind, reason: String) {
-        defer { aiStatuses[id] = nil }
+        let currentDirectory = directory
+        defer { if directory == currentDirectory { aiStatuses[id] = nil } }
         return await InvoiceAIFallback.reviewIfNeeded(at: url, local: local, willUpload: {
+            guard self.directory == currentDirectory else { return }
             self.aiStatuses[id] = "本地待确认，AI正在发送提取文字及页面预览：" + (filename ?? url.lastPathComponent)
         })
     }
@@ -211,6 +231,18 @@ public struct Invoice: Identifiable, Codable, Sendable {
         }
     }
 
+    public func automaticallyAssistUnresolvedInvoices() async {
+        guard AIConfiguration.enabled, AIConfiguration.invoiceFallbackEnabled, let currentDirectory = directory else { return }
+        let ids = invoices.filter { $0.documentKind == .unknown && $0.manuallyConfirmed != true && !pendingIDs.contains($0.id) }.map(\.id)
+        for id in ids {
+            guard !Task.isCancelled, directory == currentDirectory,
+                  AIConfiguration.enabled, AIConfiguration.invoiceFallbackEnabled else { return }
+            guard !pendingIDs.contains(id) else { continue }
+            do { try await rerecognize(id) }
+            catch { if directory == currentDirectory { lastError = "自动补充识别发票失败：\(error.localizedDescription)" } }
+        }
+    }
+
     public func rerecognize(_ id: UUID) async throws {
         guard let currentDirectory = directory,
               let invoice = invoices.first(where: { $0.id == id }),
@@ -220,7 +252,7 @@ public struct Invoice: Identifiable, Codable, Sendable {
         guard FileManager.default.fileExists(atPath: source.path) else { throw CocoaError(.fileNoSuchFile) }
         let amountRevision = amountRevisions[id, default: 0]
         pendingIDs.insert(id)
-        defer { pendingIDs.remove(id) }
+        defer { if directory == currentDirectory { pendingIDs.remove(id) } }
         let local = await Task.detached(priority: .userInitiated) {
             InvoiceDocumentClassifier.classify(at: source, text: "", filename: invoice.originalFilename)
         }.value

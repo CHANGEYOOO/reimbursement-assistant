@@ -28,8 +28,6 @@ import UniformTypeIdentifiers
 }
 
 struct InvoiceInboxView: View {
-    @AppStorage("reimbursement.ai.enabled") private var aiEnabled = false
-    @AppStorage("reimbursement.ai.invoiceFallbackEnabled") private var invoiceAIEnabled = false
     @ObservedObject var inbox: InvoiceInboxStore
     let projects: [DraftSummary]
     let targetProject: DraftSummary?
@@ -242,12 +240,6 @@ struct InvoiceInboxView: View {
                 Button("删除", role: .destructive) { controls.deleteIDs = [item.id]; controls.confirmingDelete = true }
                     .disabled(pending || controls.busy)
                 if downloaded && item.documentKind == .unknown && !item.isAcceptedInvoice {
-                    Button("AI兜底识别") {
-                        Task {
-                            do { try await inbox.rerecognize(item.id) } catch { controls.error = error.localizedDescription }
-                        }
-                    }.disabled(!aiEnabled || !invoiceAIEnabled || pending || controls.busy)
-                        .help("仅发送当前文件的提取文字和页面预览；已缓存结果会直接复用")
                     Button("人工确认是发票") {
                         do { try inbox.confirmInvoice(item.id) } catch { controls.error = error.localizedDescription }
                     }.disabled(pending || controls.busy)

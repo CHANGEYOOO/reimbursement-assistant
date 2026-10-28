@@ -243,7 +243,8 @@ private struct InboxSnapshot: Codable {
         }
         do { try persist(updated); items = updated }
         catch { lastError = error.localizedDescription; return }
-        let ids = items.filter { isDownloaded($0) && ($0.documentPolicyRevision != InvoiceDocumentClassifier.policyRevision || ($0.isAcceptedInvoice && (($0.amount ?? .zero) <= 0 || $0.buyerTitle.isEmpty))) }.map(\.id)
+        let automaticAI = AIConfiguration.enabled && AIConfiguration.invoiceFallbackEnabled
+        let ids = items.filter { isDownloaded($0) && ($0.documentPolicyRevision != InvoiceDocumentClassifier.policyRevision || ($0.isAcceptedInvoice && (($0.amount ?? .zero) <= 0 || $0.buyerTitle.isEmpty)) || (automaticAI && $0.documentKind == .unknown && $0.manuallyConfirmed != true)) }.map(\.id)
         for id in ids {
             guard !Task.isCancelled else { return }
             guard let item = items.first(where: { $0.id == id }), isDownloaded(item), !pendingIDs.contains(id) else { continue }

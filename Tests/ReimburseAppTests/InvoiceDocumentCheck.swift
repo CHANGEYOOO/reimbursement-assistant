@@ -21,7 +21,7 @@ import AppKit
     static func main() throws {
         var count = 0
         func check(_ text: String, _ kind: InvoiceDocumentKind) {
-            let result = InvoiceDocumentClassifier.classify(text: text, filename: "电子发票.pdf")
+            let result = InvoiceDocumentClassifier.verify(text: text, filename: "电子发票.pdf")
             precondition(result.kind == kind, "expected \(kind), got \(result): \(text)")
             count += 1
         }
@@ -46,6 +46,9 @@ import AppKit
         check("", .unknown)
         check(invoice.replacingOccurrences(of: "2.21", with: "0.00").replacingOccurrences(of: "36.79", with: "39.00"), .invoice)
         check(invoice.replacingOccurrences(of: "36.79", with: "-36.79").replacingOccurrences(of: "2.21", with: "-2.21").replacingOccurrences(of: "39.00", with: "-39.00"), .invoice)
+        let established = "电子发票（普通发票）\n发票号码：12345678901234567890\n开票日期：2026年10月27日\n购买方信息\n销售方信息\n价税合计（小写）39.00"
+        precondition(InvoiceDocumentClassifier.classify(text: established, filename: "发票.pdf").kind == .invoice, "Restore stable rules without requiring tax IDs or VAT arithmetic")
+        precondition(InvoiceDocumentClassifier.verify(text: established, filename: "发票.pdf").kind == .unknown, "AI still needs strict independent verification")
         precondition(InvoiceDocumentClassifier.shouldList(filename: "滴滴行程单.pdf", subject: "您的发票"))
         precondition(InvoiceDocumentClassifier.shouldList(filename: "uuid.ofd", subject: "发票"))
         precondition(!InvoiceDocumentClassifier.shouldList(filename: "invoice.exe", subject: "发票"))
@@ -127,9 +130,9 @@ import AppKit
         precondition(LocalInvoiceContent.embeddedInvoices(at: embedded).texts.count == 1, "Embedded XML name-tree Kids must be read")
         precondition(InvoiceDocumentClassifier.classify(at: embedded, text: "", filename: "embedded.pdf").kind == .invoice)
         let conflict = try embeddedPDF(xml.replacingOccurrences(of: "上海测试有限公司", with: "另外一家有限公司"), base: nativeURL, name: "conflict.pdf")
-        precondition(InvoiceDocumentClassifier.classify(at: conflict, text: "", filename: "conflict.pdf").kind == .unknown, "Embedded and visible seller must agree")
+        precondition(InvoiceDocumentClassifier.classify(at: conflict, text: "", filename: "conflict.pdf").kind == .invoice, "Restored local policy no longer requires embedded XML field agreement")
         let taxConflict = try embeddedPDF(xml.replacingOccurrences(of: "36.79", with: "35.79").replacingOccurrences(of: "2.21", with: "3.21"), base: nativeURL, name: "tax-conflict.pdf")
-        precondition(InvoiceDocumentClassifier.classify(at: taxConflict, text: "", filename: "tax-conflict.pdf").kind == .unknown, "Balanced but different embedded tax must not pass")
+        precondition(InvoiceDocumentClassifier.classify(at: taxConflict, text: "", filename: "tax-conflict.pdf").kind == .invoice, "Restored local policy accepts the ordinary invoice page; AI verification remains separate")
         nativePDF([legacy], to: nativeURL)
         precondition(InvoiceDocumentClassifier.classify(at: nativeURL, text: "", filename: "neutral.pdf").kind == .invoice)
         nativePDF([invoice, "酒店住宿明细\n发票号码和税额仅供参考"], to: nativeURL)
@@ -155,7 +158,7 @@ import AppKit
             if url.pathExtension == "ofd" { precondition(result.kind == .invoice, "Reference OFD must pass structured checks") }
             print("Real fixture \(url.lastPathComponent): \(result.kind) — \(result.reason)")
         }
-        print("Local invoice filter checks passed: \(count) text cases; structured XML, unknown XML, DTD, scanned/encrypted PDF, image input checked. Fixtures retained: \(directory.path)")
+        print("Restored local policy and strict AI verification checks passed: \(count) verification text cases; structured XML, unknown XML, DTD, scanned/encrypted PDF, image input checked. Fixtures retained: \(directory.path)")
     }
 }
 #endif

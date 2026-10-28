@@ -63,8 +63,8 @@ struct InvoiceAIInput: Sendable {
 
     static func verify(native: String, recognized: String, embedded: (texts: [String], reason: String?), pageCount: Int)
         -> (kind: InvoiceDocumentKind, reason: String, type: InvoiceAIReport.DocumentType?, conflict: Bool) {
-        let plain = InvoiceDocumentClassifier.classify(text: native, filename: "")
-        let ocr = InvoiceDocumentClassifier.classify(text: recognized, filename: "")
+        let plain = InvoiceDocumentClassifier.verify(text: native, filename: "")
+        let ocr = InvoiceDocumentClassifier.verify(text: recognized, filename: "")
         if plain.kind != .unknown && ocr.kind != .unknown && (plain.kind != ocr.kind || (plain.kind == .invoice && !InvoiceDocumentClassifier.fieldsAgree(native, recognized))) {
             return (.unknown, "原生文本与本地OCR关键字段矛盾。", nil, true)
         }
@@ -238,7 +238,7 @@ actor InvoiceAIService {
             let data = try Data(contentsOf: url)
             let fingerprint = Self.hash(data)
             let key = Self.hash(Data([fingerprint, configuration.endpoint.absoluteString, configuration.model, Self.hash(Data(configuration.apiKey.utf8)),
-                                     String(InvoiceAIRequest.revision), String(InvoiceDocumentClassifier.policyRevision)].joined(separator: "\n").utf8))
+                                     String(InvoiceAIRequest.revision), String(InvoiceDocumentClassifier.verificationRevision)].joined(separator: "\n").utf8))
             let result: InvoiceAIAssessment
             if let cached = cache[key] { result = cached }
             else if let task = flights[key] {

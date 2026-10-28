@@ -1,5 +1,7 @@
 import Foundation
 import PDFKit
+import ImageIO
+import Vision
 
 public enum InvoiceDocumentKind: String, Codable, Sendable {
     case invoice, nonInvoice, unknown
@@ -7,7 +9,8 @@ public enum InvoiceDocumentKind: String, Codable, Sendable {
 
 // Document screening only; this does not establish tax-authority authenticity.
 enum InvoiceDocumentClassifier {
-    static let policyRevision = 3
+    static let policyRevision = 4
+    static let verificationRevision = 3
     static let supportedExtensions: Set<String> = ["pdf", "ofd", "xml", "png", "jpg", "jpeg", "heic", "heif"]
     private static let supportingDocuments = [
         "电子客票", "行程单", "行程明细", "行程记录", "出行记录", "行程确认单", "报销单", "报销汇总", "报销明细",
@@ -23,40 +26,82 @@ enum InvoiceDocumentClassifier {
     }
 
     static func classify(at url: URL, text: String, filename: String) -> (kind: InvoiceDocumentKind, reason: String) {
+        let ext = url.pathExtension.lowercased()
+        if ext == "pdf" {
+            guard let document = PDFDocument(url: url), !document.isEncrypted, !document.isLocked,
+                  document.pageCount > 0, document.pageCount <= 100 else { return (.unknown, "PDF 加密或无法读取，保留待确认。") }
+            var results: [(kind: InvoiceDocumentKind, reason: String)] = []
+            for index in 0..<document.pageCount {
+                guard let page = document.page(at: index) else { return (.unknown, "PDF页面无法读取。") }
+                let direct = classify(text: page.string ?? "", filename: filename)
+                if direct.kind != .unknown { results.append(direct); continue }
+                guard let image = page.thumbnail(of: CGSize(width: 1800, height: 2400), for: .mediaBox)
+                    .cgImage(forProposedRect: nil, context: nil, hints: nil) else { results.append(direct); continue }
+                results.append(classify(text: recognizedText(image), filename: filename))
+            }
+            if results.allSatisfy({ $0.kind == .invoice }) { return (.invoice, "已按恢复的本地规则识别为电子发票。") }
+            if results.allSatisfy({ $0.kind == .nonInvoice }) { return (.nonInvoice, results[0].reason) }
+            return (.unknown, "PDF仍有无法确定或混合类型的页面：" + results.filter { $0.kind != .invoice }.map(\.reason).joined(separator: "；"))
+        }
+        if ["png", "jpg", "jpeg", "heic", "heif"].contains(ext),
+           let source = CGImageSourceCreateWithURL(url as CFURL, nil), let image = CGImageSourceCreateImageAtIndex(source, 0, nil) {
+            return classify(text: recognizedText(image), filename: filename)
+        }
         let content = LocalInvoiceContent.read(at: url)
         if let reason = content.reason { return (.unknown, reason) }
-        if url.pathExtension.lowercased() == "pdf" {
-            guard let document = PDFDocument(url: url), !document.isEncrypted, !document.isLocked,
-                  document.pageCount > 0, document.pageCount <= 100 else { return (.unknown, "PDF 加密、无法读取或页数超过检查上限。") }
-            let embedded = LocalInvoiceContent.embeddedInvoices(at: url)
-            var results: [(kind: InvoiceDocumentKind, reason: String)] = []
-            var verifiedTexts: [String] = []
-            for index in 0..<document.pageCount {
-                guard let page = document.page(at: index), let native = page.string, !compact(native).isEmpty else {
-                    return (.unknown, "第 \(index + 1) 页缺少可提取文本；扫描件不自动认定为发票。")
-                }
-                let direct = classify(text: native, filename: filename)
-                let verified = direct.kind == .unknown ? LocalInvoiceContent.pageText(page) : native
-                verifiedTexts.append(verified)
-                results.append(direct.kind == .unknown ? classify(text: verified, filename: filename) : direct)
-            }
-            if results.allSatisfy({ $0.kind == .invoice }) {
-                if let reason = embedded.reason { return (.unknown, reason) }
-                if !embedded.texts.isEmpty {
-                    guard document.pageCount == 1,
-                          embedded.texts.allSatisfy({ fieldsAgree($0, verifiedTexts[0]) }) else {
-                        return (.unknown, "PDF内嵌发票数据与票面字段不一致、字段不全或存在多页映射歧义。")
-                    }
-                }
-                return (.invoice, "各页均符合受支持电子发票票种，关键字段与金额交叉校验通过。" + (embedded.texts.isEmpty ? "" : "内嵌XML与票面一致。"))
-            }
-            if results.allSatisfy({ $0.kind == .nonInvoice }) { return (.nonInvoice, results[0].reason) }
-            return (.unknown, "PDF 包含未确认或混合类型页面：" + results.filter { $0.kind != .invoice }.map(\.reason).joined(separator: "；"))
-        }
-        return classify(text: content.text, filename: filename)
+        return verify(text: content.text, filename: filename)
+    }
+
+    private static func recognizedText(_ image: CGImage) -> String {
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.recognitionLanguages = ["zh-Hans", "en-US"]
+        do {
+            try VNImageRequestHandler(cgImage: image).perform([request])
+            return (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }.joined(separator: "\n")
+        } catch { return "" }
     }
 
     static func classify(text: String, filename: String) -> (kind: InvoiceDocumentKind, reason: String) {
+        let normalized = text.precomposedStringWithCompatibilityMapping
+        let lines = normalized.components(separatedBy: .newlines).map(compact).filter { !$0.isEmpty }
+        let source = compact(normalized)
+        guard !source.isEmpty else { return (.unknown, "尚未取得可识别的票面内容。") }
+
+        let head = Array(lines.prefix(12))
+        let invoiceLine = head.firstIndex(where: establishedInvoiceTitle)
+        let supportingLine = head.firstIndex { line in
+            supportingDocuments.contains(where: line.contains)
+        }
+        if let supportingLine, invoiceLine == nil || supportingLine <= invoiceLine! {
+            return (.nonInvoice, "票面标题为行程、报销或明细材料，不作为发票计入。")
+        }
+        let number = (source.contains("发票号码") || source.contains("发票号"))
+            && has(#"(?<![0-9])[0-9]{8,20}(?![0-9])"#, normalized)
+        let date = source.contains("开票日期") && has(#"(?:19|20)[0-9]{2}[年./-](?:0?[1-9]|1[0-2])[月./-](?:0?[1-9]|[12][0-9]|3[01])"#, source)
+        let amount = source.contains("价税合计")
+        let buyer = source.contains("购买方")
+        let seller = source.contains("销售方")
+        if invoiceLine != nil, number, date, amount, buyer, seller {
+            return (.invoice, "已识别为电子普通发票，关键票面字段齐全。")
+        }
+        if invoiceLine == nil, ["非发票", "不作为发票", "不能作为发票"].contains(where: source.contains) {
+            return (.nonInvoice, "文档明确注明非发票。")
+        }
+        let extended = verify(text: text, filename: filename)
+        return extended.kind == .invoice ? extended : (.unknown, "本地仍无法确认电子发票，等待AI兜底或人工确认。")
+    }
+
+    private static func establishedInvoiceTitle(_ line: String) -> Bool {
+        if ["说明", "申请", "清单", "汇总", "报销单", "报销明细", "操作指南"].contains(where: line.contains) { return false }
+        return has(#"^(?:[\p{Han}]{0,12})?(?:增值税电子普通发票|电子发票[（(]?普通发票[）)]?)"#, line)
+    }
+
+    private static func has(_ pattern: String, _ value: String) -> Bool {
+        value.range(of: pattern, options: .regularExpression) != nil
+    }
+
+    static func verify(text: String, filename: String) -> (kind: InvoiceDocumentKind, reason: String) {
         let lines = text.precomposedStringWithCompatibilityMapping.components(separatedBy: .newlines).map(compact).filter { !$0.isEmpty }
         guard !lines.isEmpty else { return (.unknown, "未取得可验证的文件内部文本。") }
         let titles = Array(lines.prefix(12))
@@ -134,7 +179,7 @@ enum InvoiceDocumentClassifier {
         return (title.hasPrefix("电子发票") ? "digital_" : "vat_electronic_") + (title.contains("普通发票") ? "general" : "special")
     }
     static func fieldsAgree(_ first: String, _ second: String) -> Bool {
-        classify(text: first, filename: "").kind == .invoice && classify(text: second, filename: "").kind == .invoice && identity(first) == identity(second)
+        verify(text: first, filename: "").kind == .invoice && verify(text: second, filename: "").kind == .invoice && identity(first) == identity(second)
     }
 
     private static func identity(_ text: String) -> [String] {
