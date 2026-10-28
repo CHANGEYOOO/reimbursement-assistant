@@ -79,6 +79,20 @@ import AppKit
         precondition(!rejected.isAcceptedInvoice, "A filename amount cannot turn a report into an invoice")
         try store.update(rejected.id, amount: "66", buyerTitle: "手动抬头")
         do { try store.assign(ids: [rejected.id], to: project); preconditionFailure("Money edits cannot override document rejection") } catch {}
+        try store.confirmInvoice(rejected.id)
+        precondition(!store.items.first(where: { $0.id == rejected.id })!.isAcceptedInvoice, "Explicit non-invoices cannot be manually promoted")
+        let uncertainFile = root.appendingPathComponent("未知附件.pdf")
+        try makePDF(title: "普通附件").write(to: uncertainFile)
+        await store.importFiles([uncertainFile])
+        let uncertain = store.items.first { $0.originalFilename == uncertainFile.lastPathComponent }!
+        precondition(uncertain.documentKind == .unknown && !uncertain.isAcceptedInvoice)
+        try store.update(uncertain.id, amount: "39", buyerTitle: "购买方")
+        precondition(!store.items.first(where: { $0.id == uncertain.id })!.isAcceptedInvoice)
+        try store.confirmInvoice(uncertain.id)
+        precondition(store.items.first(where: { $0.id == uncertain.id })!.isAcceptedInvoice)
+        try store.assign(ids: [uncertain.id], to: project)
+        let manualProjectInvoices = try JSONDecoder().decode([Invoice].self, from: Data(contentsOf: projectURL.appendingPathComponent("invoices.json")))
+        precondition(manualProjectInvoices.contains { $0.documentKind == .unknown && $0.manuallyConfirmed == true && $0.isAccepted })
         var oldSnapshot = try JSONSerialization.jsonObject(with: Data(contentsOf: boxMetadata)) as! [String: Any]
         var oldItems = oldSnapshot["items"] as! [[String: Any]]
         let rejectedIndex = oldItems.firstIndex { ($0["originalFilename"] as? String) == rejectedFile.lastPathComponent }!
@@ -170,7 +184,7 @@ import AppKit
         }
         print("Invoice inbox persistence, metadata-only sync, deduplication, project assignment checks passed; temporary files retained at \(root.path)")
     }
-    private static func makePDF(title: String = "增值税电子普通发票") -> Data {
+    private static func makePDF(title: String = "电子发票（普通发票）") -> Data {
         let data = NSMutableData()
         var bounds = CGRect(x: 0, y: 0, width: 600, height: 400)
         let context = CGContext(consumer: CGDataConsumer(data: data)!, mediaBox: &bounds, nil)!
@@ -178,10 +192,10 @@ import AppKit
         NSGraphicsContext.saveGraphicsState()
         NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: false)
         let font: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 12)]
-        ("\(title) 发票号码：12345678901234567890\n开票日期：2026年10月27日" as NSString).draw(at: CGPoint(x: 30, y: 360), withAttributes: font)
-        ("购买方信息\n名称：测试购买公司\n纳税人识别号：TEST" as NSString).draw(at: CGPoint(x: 30, y: 300), withAttributes: font)
-        ("销售方信息\n名称：测试销售公司\n纳税人识别号：SELLER" as NSString).draw(at: CGPoint(x: 320, y: 300), withAttributes: font)
-        ("价税合计 ¥39.00\n*餐饮服务*餐费" as NSString).draw(at: CGPoint(x: 30, y: 150), withAttributes: font)
+        ("\(title)\n发票号码：12345678901234567890\n开票日期：2026年10月27日" as NSString).draw(at: CGPoint(x: 30, y: 360), withAttributes: font)
+        ("购买方信息\n名称：测试购买公司\n纳税人识别号：91310101123456789A" as NSString).draw(at: CGPoint(x: 30, y: 300), withAttributes: font)
+        ("销售方信息\n名称：测试销售公司\n纳税人识别号：91310101987654321B" as NSString).draw(at: CGPoint(x: 320, y: 300), withAttributes: font)
+        ("金额合计 ¥36.79\n税额合计 ¥2.21\n价税合计 ¥39.00\n*餐饮服务*餐费" as NSString).draw(at: CGPoint(x: 30, y: 150), withAttributes: font)
         NSGraphicsContext.restoreGraphicsState()
         context.endPDFPage()
         context.closePDF()

@@ -22,7 +22,7 @@ import UniformTypeIdentifiers
     @Published var error: String?
     @Published var busy = false
     @Published var dropTarget = false
-    @Published var documentFilter = "发票"
+    @Published var documentFilter = "电子发票"
     @Published var deleteIDs: Set<UUID> = []
     @Published var confirmingDelete = false
 }
@@ -41,7 +41,7 @@ struct InvoiceInboxView: View {
 
     private var filtered: [InboxInvoice] {
         inbox.items.filter { item in
-            (controls.documentFilter == "发票" ? item.isAcceptedInvoice : controls.documentFilter == "待下载附件" ? !inbox.isDownloaded(item) && !item.isAcceptedInvoice && item.documentKind != .nonInvoice : inbox.isDownloaded(item) && !item.isAcceptedInvoice || item.documentKind == .nonInvoice) &&
+            (controls.documentFilter == "电子发票" ? item.isAcceptedInvoice : controls.documentFilter == "待下载附件" ? !inbox.isDownloaded(item) && !item.isAcceptedInvoice : controls.documentFilter == "非发票附件" ? item.documentKind == .nonInvoice : inbox.isDownloaded(item) && !item.isAcceptedInvoice && item.documentKind != .nonInvoice) &&
             (controls.buyer == "全部抬头" || (controls.buyer == "抬头未知" ? item.buyerTitle.isEmpty : item.buyerTitle == controls.buyer)) &&
             (controls.assignment == "全部状态" || (controls.assignment == "未加入" ? item.projectID == nil : item.projectID != nil)) &&
             (!controls.dateFilter || InvoiceInboxDates.contains(item.receivedAt, from: controls.start, through: controls.end))
@@ -50,7 +50,7 @@ struct InvoiceInboxView: View {
     private var selectable: Set<UUID> { Set(filtered.filter { !inbox.pendingIDs.contains($0.id) }.map(\.id)) }
     private var chosen: Set<UUID> { controls.selected.intersection(selectable).intersection(Set(inbox.items.filter { $0.projectID == nil && $0.isAcceptedInvoice }.map(\.id))) }
     private var selectedItems: [InboxInvoice] { filtered.filter { controls.selected.contains($0.id) } }
-    private var selectedTotal: Decimal { selectedItems.filter { ($0.amount ?? .zero) > 0 }.reduce(.zero) { $0 + ($1.amount ?? .zero) } }
+    private var selectedTotal: Decimal { selectedItems.filter { $0.isAcceptedInvoice && ($0.amount ?? .zero) > 0 }.reduce(.zero) { $0 + ($1.amount ?? .zero) } }
     private var monthGroups: [Date] { InvoiceInboxDates.months(filtered.map(\.receivedAt)) }
     private var joiningTitle: String {
         let downloads = inbox.items.contains { chosen.contains($0.id) && !inbox.isDownloaded($0) }
@@ -83,14 +83,14 @@ struct InvoiceInboxView: View {
             }
             if !syncStatus.isEmpty { Text(syncStatus).font(.caption).foregroundStyle(.secondary) }
             filters
-            Text("只收录通过自动检查的电子普通发票；新收附件自动下载识别；历史或下载失败的附件可在“待下载附件”中手动下载。")
+            Text("本地检查电子发票；可疑附件保留在“待确认”，明确的行程单、明细单等归入“非发票附件”，不计入项目发票。")
                 .font(.caption).foregroundStyle(.secondary)
             HStack {
                 Toggle("全选当前结果", isOn: Binding(get: { !selectable.isEmpty && selectable.isSubset(of: controls.selected) }, set: {
                     if $0 { controls.selected.formUnion(selectable) } else { controls.selected.subtract(selectable) }
                 })).toggleStyle(.checkbox)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("已选 \(selectedItems.count) 张，合计 ¥\(selectedTotal.formatted(.number.precision(.fractionLength(2))))")
+                    Text("已选 \(selectedItems.count) 份，发票合计 ¥\(selectedTotal.formatted(.number.precision(.fractionLength(2))))")
                     if selectedItems.contains(where: { ($0.amount ?? .zero) <= 0 }) {
                         Text("未填写有效金额的附件暂不计入合计").font(.caption)
                     }
@@ -144,7 +144,7 @@ struct InvoiceInboxView: View {
         VStack(alignment: .leading) {
             HStack {
                 Picker("附件类型", selection: $controls.documentFilter) {
-                    ForEach(["发票", "待下载附件", "已排除附件"], id: \.self) { Text($0).tag($0) }
+                    ForEach(["电子发票", "待确认", "非发票附件", "待下载附件"], id: \.self) { Text($0).tag($0) }
                 }.frame(width: 220)
                 Picker("购买方抬头", selection: $controls.buyer) {
                     Text("全部抬头").tag("全部抬头")
@@ -212,9 +212,9 @@ struct InvoiceInboxView: View {
                 Text(item.amount.map { "¥" + $0.formatted(.number.precision(.fractionLength(2))) } ?? (downloaded ? "金额待填写" : "下载后识别金额"))
                     .font(.title3.weight(.semibold)).monospacedDigit()
             }
-            Text(item.isAcceptedInvoice ? "电子普通发票" : !downloaded && item.documentKind != .nonInvoice ? "待下载自动识别" : "已排除：未通过发票检查")
+            Text(item.isAcceptedInvoice ? (item.manuallyConfirmed == true ? "电子发票（人工确认）" : "电子发票") : !downloaded ? "待下载自动识别" : item.documentKind == .nonInvoice ? "非发票附件" : "待确认：未能可靠判断")
                 .font(.caption).foregroundStyle(item.isAcceptedInvoice ? Color.secondary : Color.orange)
-            if let reason = item.documentReason, !item.isAcceptedInvoice { Text(reason).font(.caption).foregroundStyle(.secondary) }
+            if let reason = item.documentReason { Text(reason).font(.caption).foregroundStyle(.secondary) }
             Text("购买方：" + (item.buyerTitle.isEmpty ? (downloaded ? "抬头未知" : "下载后识别抬头") : item.buyerTitle))
             if !item.itemDescription.isEmpty { Text("内容：" + item.itemDescription).lineLimit(2) }
             HStack {
@@ -235,6 +235,11 @@ struct InvoiceInboxView: View {
                 Button(downloaded ? "预览" : "下载并预览") { preview(item) }.disabled(pending || controls.busy)
                 Button("删除", role: .destructive) { controls.deleteIDs = [item.id]; controls.confirmingDelete = true }
                     .disabled(pending || controls.busy)
+                if downloaded && item.documentKind == .unknown && !item.isAcceptedInvoice {
+                    Button("人工确认是发票") {
+                        do { try inbox.confirmInvoice(item.id) } catch { controls.error = error.localizedDescription }
+                    }.disabled(pending || controls.busy)
+                }
                 Button("修改金额与抬头") {
                     controls.amount = item.amount.map { NSDecimalNumber(decimal: $0).stringValue } ?? ""
                     controls.title = item.buyerTitle
@@ -355,7 +360,7 @@ struct InvoiceInboxView: View {
     private func importFiles() {
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = true
-        panel.allowedContentTypes = [.image, .pdf, .zip]
+        panel.allowedContentTypes = [.image, .pdf, .zip, .xml, UTType(filenameExtension: "ofd") ?? .data]
         if panel.runModal() == .OK { let urls = panel.urls; Task { await inbox.importFiles(urls) } }
     }
     private func dropped(_ providers: [NSItemProvider]) -> Bool {

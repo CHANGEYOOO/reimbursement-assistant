@@ -3,7 +3,6 @@ import Combine
 import CryptoKit
 import Foundation
 import ImageIO
-import PDFKit
 import Vision
 
 public struct Invoice: Identifiable, Codable, Sendable {
@@ -14,10 +13,13 @@ public struct Invoice: Identifiable, Codable, Sendable {
     public var amount: Decimal?
     public var warning: String?
     public var documentKind: InvoiceDocumentKind? = nil
+    public var documentReason: String? = nil
+    public var manuallyConfirmed: Bool? = nil
     public var documentPolicyRevision: Int? = nil
 
     public var isAccepted: Bool {
-        documentKind == .invoice && documentPolicyRevision == InvoiceDocumentClassifier.policyRevision
+        documentPolicyRevision == InvoiceDocumentClassifier.policyRevision
+            && (documentKind == .invoice || (documentKind == .unknown && manuallyConfirmed == true))
     }
 }
 
@@ -31,7 +33,8 @@ public struct Invoice: Identifiable, Codable, Sendable {
     public init() {}
 
     public var acceptedInvoices: [Invoice] { invoices.filter(\.isAccepted) }
-    public var excludedCount: Int { invoices.filter { !$0.isAccepted && !pendingIDs.contains($0.id) }.count }
+    public var excludedCount: Int { invoices.filter { $0.documentKind == .nonInvoice && !pendingIDs.contains($0.id) }.count }
+    public var unknownCount: Int { invoices.filter { !$0.isAccepted && $0.documentKind != .nonInvoice && !pendingIDs.contains($0.id) }.count }
 
     public var total: Decimal {
         acceptedInvoices.filter { !needsConfirmation($0) }.reduce(Decimal.zero) { $0 + ($1.amount ?? .zero) }
@@ -98,18 +101,14 @@ public struct Invoice: Identifiable, Codable, Sendable {
             }
             let result = try await Task.detached(priority: .userInitiated) {
                 let data = try Data(contentsOf: url)
-                let text = try Self.invoiceText(at: url)
-                let classification = InvoiceDocumentClassifier.classify(at: url, text: text, filename: url.lastPathComponent)
+                let classification = InvoiceDocumentClassifier.classify(at: url, text: "", filename: url.lastPathComponent)
+                let text = classification.kind == .invoice ? ((try? Self.invoiceText(at: url)) ?? "") : ""
                 let amount = classification.kind == .invoice
                     ? Self.amountInFilename(url.deletingPathExtension().lastPathComponent)
                         ?? (try? InvoiceAmountRecognition.total(at: url, text: text)) : nil
                 return (data, classification.kind, classification.reason, amount)
             }.value
             guard directory == currentDirectory else { return }
-            guard result.1 == .invoice else {
-                lastError = "已排除：\(url.lastPathComponent)。\(result.2)"
-                return
-            }
             let hash = SHA256.hash(data: result.0).map { String(format: "%02x", $0) }.joined()
             guard !invoices.contains(where: { $0.fingerprint == hash }) else {
                 lastError = "已跳过重复发票：\(url.lastPathComponent)"
@@ -119,8 +118,10 @@ public struct Invoice: Identifiable, Codable, Sendable {
             try result.0.write(to: filesDirectory.appendingPathComponent(filename), options: .atomic)
             invoices.append(Invoice(id: id, storedFilename: filename,
                                     originalFilename: url.lastPathComponent, fingerprint: hash,
-                                    amount: result.3, warning: result.3 == nil ? "未识别到价税合计，请手动填写。" : nil,
-                                    documentKind: .invoice, documentPolicyRevision: InvoiceDocumentClassifier.policyRevision))
+                                    amount: result.3,
+                                    warning: result.1 == .invoice ? (result.3 == nil ? "未识别到价税合计，请手动填写。" : nil) : result.2,
+                                    documentKind: result.1, documentReason: result.2,
+                                    documentPolicyRevision: InvoiceDocumentClassifier.policyRevision))
             try save()
         } catch {
             lastError = "导入发票失败：\(error.localizedDescription)"
@@ -133,13 +134,21 @@ public struct Invoice: Identifiable, Codable, Sendable {
             pendingIDs.insert(invoice.id)
             let source = sourceURL(for: invoice)
             Task {
-                let kind = await Task.detached(priority: .utility) {
-                    guard let text = try? Self.invoiceText(at: source) else { return InvoiceDocumentKind.nonInvoice }
-                    return InvoiceDocumentClassifier.classify(at: source, text: text, filename: invoice.originalFilename).kind
+                let result = await Task.detached(priority: .utility) {
+                    InvoiceDocumentClassifier.classify(at: source, text: "", filename: invoice.originalFilename)
                 }.value
                 guard directory == currentDirectory,
                       let index = invoices.firstIndex(where: { $0.id == invoice.id }) else { return }
-                invoices[index].documentKind = kind == .invoice ? .invoice : .nonInvoice
+                let previousReason = invoices[index].documentReason
+                invoices[index].documentKind = result.kind
+                invoices[index].documentReason = result.reason
+                invoices[index].manuallyConfirmed = nil
+                if result.kind != .invoice { invoices[index].warning = result.reason }
+                else if (invoices[index].amount ?? .zero) <= 0 {
+                    invoices[index].warning = "请填写大于 0 的发票金额。"
+                } else if invoices[index].warning == previousReason {
+                    invoices[index].warning = nil
+                }
                 invoices[index].documentPolicyRevision = InvoiceDocumentClassifier.policyRevision
                 pendingIDs.remove(invoice.id)
                 do { try save() } catch { lastError = "保存发票识别结果失败：\(error.localizedDescription)" }
@@ -151,21 +160,16 @@ public struct Invoice: Identifiable, Codable, Sendable {
         let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("reimbursement-invoices-\(UUID().uuidString)", isDirectory: true)
         do {
             try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
-            let extract = Process()
-            extract.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
-            extract.arguments = ["-x", "-k", url.path, temporary.path]
-            try extract.run()
-            extract.waitUntilExit()
-            guard extract.terminationStatus == 0 else { throw CocoaError(.fileReadCorruptFile) }
-            let files = FileManager.default.enumerator(at: temporary, includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey])?
-                .allObjects.compactMap { $0 as? URL }
-                .filter { file in
-                    guard Self.isSupported(file),
-                          let values = try? file.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey]) else { return false }
-                    return values.isRegularFile == true && values.isSymbolicLink != true
-                } ?? []
-            guard !files.isEmpty else { throw CocoaError(.fileReadUnknown) }
-            for file in files { await importFile(file) }
+            let attachments = try await Task.detached(priority: .userInitiated) {
+                let data = try Data(contentsOf: url)
+                guard data.count <= 40 * 1024 * 1024 else { throw CocoaError(.fileReadTooLarge) }
+                return try InvoiceInboxStore.readArchive(data)
+            }.value
+            for attachment in attachments {
+                let file = temporary.appendingPathComponent(attachment.name)
+                try attachment.data.write(to: file, options: .atomic)
+                await importFile(file)
+            }
         } catch {
             lastError = "压缩包导入失败：\(error.localizedDescription)"
         }
@@ -181,6 +185,20 @@ public struct Invoice: Identifiable, Codable, Sendable {
                 lastError = "临时目录无法移入废纸篓，请手动处理：\(temporary.path)"
             }
         }
+    }
+
+    public func confirmInvoice(_ id: UUID) throws {
+        guard let index = invoices.firstIndex(where: { $0.id == id }),
+              !pendingIDs.contains(id), invoices[index].documentKind == .unknown,
+              invoices[index].documentPolicyRevision == InvoiceDocumentClassifier.policyRevision else {
+            throw NSError(domain: "InvoiceStore", code: 5,
+                          userInfo: [NSLocalizedDescriptionKey: "仅可人工确认已完成识别的待确认文件；明确的非发票附件不能确认。"])
+        }
+        guard invoices[index].manuallyConfirmed != true else { return }
+        invoices[index].manuallyConfirmed = true
+        invoices[index].documentReason = (invoices[index].documentReason ?? "自动识别无法确定文件类型。") + " 已由用户人工确认是电子发票。"
+        invoices[index].warning = (invoices[index].amount ?? .zero) > 0 ? nil : "请填写大于 0 的发票金额。"
+        try save()
     }
 
     public func updateAmount(_ text: String, for id: UUID) {
@@ -277,7 +295,7 @@ public struct Invoice: Identifiable, Codable, Sendable {
     }
 
     private nonisolated static func isSupported(_ url: URL) -> Bool {
-        return ["png", "jpg", "jpeg", "heic", "heif", "pdf"].contains(url.pathExtension.lowercased())
+        return InvoiceDocumentClassifier.supportedExtensions.contains(url.pathExtension.lowercased())
     }
 
     nonisolated static func amountInFilename(_ name: String) -> Decimal? {
@@ -308,13 +326,8 @@ public struct Invoice: Identifiable, Codable, Sendable {
     }
 
     nonisolated static func invoiceText(at url: URL) throws -> String {
-        if url.pathExtension.lowercased() == "pdf", let pdf = PDFDocument(url: url) {
-            if let text = pdf.string, text.count > 30 { return text }
-            return try (0..<min(pdf.pageCount, 3)).compactMap { index in
-                guard let image = pdf.page(at: index)?.thumbnail(of: CGSize(width: 1800, height: 2400), for: .mediaBox)
-                    .cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
-                return try recognizedText(image)
-            }.joined(separator: "\n")
+        if ["pdf", "ofd", "xml"].contains(url.pathExtension.lowercased()) {
+            return LocalInvoiceContent.read(at: url).text
         }
         guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
               let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else { return "" }

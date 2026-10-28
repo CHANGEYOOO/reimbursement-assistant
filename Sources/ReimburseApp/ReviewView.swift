@@ -324,7 +324,7 @@ public struct ReviewView: View {
 
                 HStack {
                     if controls.showingInvoices {
-                        Text("已导入发票 \(invoices.acceptedInvoices.count) 张 · 已排除附件 \(invoices.excludedCount) 份 · 原格式独立导出")
+                        Text("已导入发票 \(invoices.acceptedInvoices.count) 张 · 待确认 \(invoices.unknownCount) 份 · 非发票附件 \(invoices.excludedCount) 份 · 原格式独立导出")
                             .font(.caption).foregroundStyle(.secondary)
                     } else {
                         Text("已导入 \(store.expenses.count) 张 · 有效 \(store.exportExpenses.count) 笔 · 待处理 \(store.reviewCount) 笔 · 已填订单总额 ¥\(currency(store.total))")
@@ -420,7 +420,7 @@ public struct ReviewView: View {
     private var invoiceList: some View {
         ScrollView {
             LazyVStack(spacing: 8) {
-                ForEach(invoices.acceptedInvoices) { invoice in
+                ForEach(invoices.invoices) { invoice in
                     InvoiceRow(invoice: invoice, store: invoices,
                                preview: { url in
                                    controls.invoicePreviewURL = url
@@ -588,7 +588,7 @@ public struct ReviewView: View {
 
     private func chooseInvoices() {
         let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.png, .jpeg, .heic, .pdf, .zip]
+        panel.allowedContentTypes = [.png, .jpeg, .heic, .pdf, .zip, .xml, UTType(filenameExtension: "ofd") ?? .data]
         panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false
         if panel.runModal() == .OK { invoices.importFiles(panel.urls) }
@@ -627,7 +627,7 @@ public struct ReviewView: View {
             var urls: [URL] = []
             for provider in files {
                 if let url = await droppedURL(from: provider), url.isFileURL,
-                   (controls.showingInvoices ? ["png", "jpg", "jpeg", "heic", "heif", "pdf", "zip"] : ["png", "jpg", "jpeg", "heic"]).contains(url.pathExtension.lowercased()) {
+                   (controls.showingInvoices ? Array(InvoiceDocumentClassifier.supportedExtensions.union(["zip"])) : ["png", "jpg", "jpeg", "heic"]).contains(url.pathExtension.lowercased()) {
                     urls.append(url)
                 }
             }
@@ -694,6 +694,8 @@ private struct InvoiceRow: View {
             Button(invoice.originalFilename) { preview(store.sourceURL(for: invoice)) }
                 .frame(maxWidth: .infinity, alignment: .leading)
             if store.pendingIDs.contains(invoice.id) { ProgressView() }
+            Text(invoice.isAccepted ? (invoice.manuallyConfirmed == true ? "电子发票（人工确认）" : "电子发票") : invoice.documentKind == .nonInvoice ? "非发票附件" : "待确认")
+                .font(.caption).foregroundStyle(invoice.isAccepted ? Color.secondary : Color.orange)
             TextField("价税合计", text: Binding(
                 get: { amountDraft.text },
                 set: { value in
@@ -704,8 +706,14 @@ private struct InvoiceRow: View {
             ))
                 .textFieldStyle(.roundedBorder)
                 .frame(width: 120)
+            if let reason = invoice.documentReason { Text(reason).font(.caption).foregroundStyle(.secondary).lineLimit(3) }
             if let warning = invoice.warning { Text(warning).font(.caption).foregroundStyle(.orange) }
             else if store.needsConfirmation(invoice) { Text("待确认金额").font(.caption).foregroundStyle(.orange) }
+            if invoice.documentKind == .unknown && !invoice.isAccepted {
+                Button("人工确认是发票") {
+                    do { try store.confirmInvoice(invoice.id) } catch { reportError(error.localizedDescription) }
+                }.disabled(store.pendingIDs.contains(invoice.id))
+            }
             Button("删除") {
                 do { try store.delete(invoice.id) }
                 catch { reportError(error.localizedDescription) }

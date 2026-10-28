@@ -39,9 +39,9 @@ import Foundation
         let invoicePart = #"("APPLICATION" "PDF" ("NAME" "电子发票.pdf") NIL NIL "BASE64" 120 NIL ("ATTACHMENT" ("FILENAME" "电子发票.pdf")) NIL NIL)"#
         let mixedStructure = "(" + invoicePart + tripPart + " \"MIXED\" (\"BOUNDARY\" \"x\") NIL NIL NIL)"
         let mixed = try QQMailboxParser.message(Data(reply.replacingOccurrences(of: structure, with: mixedStructure).utf8), account: "test@qq.com", uidValidity: "7", uid: 8)
-        precondition(mixed.attachments.map(\.filename) == ["电子发票.pdf"], "Invoice mail must not import its itinerary attachment")
+        precondition(mixed.attachments.map(\.filename) == ["电子发票.pdf", "行程单.pdf"], "Mixed mail attachments must reach local content screening rather than filename classification")
         let onlyTrip = try QQMailboxParser.message(Data(reply.replacingOccurrences(of: structure, with: tripPart).utf8), account: "test@qq.com", uidValidity: "7", uid: 8)
-        precondition(onlyTrip.attachments.isEmpty && !onlyTrip.hasDownloadLink, "Excluded supporting attachments must not be reported as missing download links")
+        precondition(onlyTrip.attachments.map(\.filename) == ["行程单.pdf"] && !onlyTrip.hasDownloadLink, "Invoice-mail candidates are classified after download, with no invented missing link")
         let start = Calendar.current.startOfDay(for: ISO8601DateFormatter().date(from: "2026-10-26T11:57:06Z")!)
         let expected = DateFormatter()
         expected.locale = Locale(identifier: "en_US_POSIX")

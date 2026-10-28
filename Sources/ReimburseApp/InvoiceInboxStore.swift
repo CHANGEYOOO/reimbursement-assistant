@@ -21,11 +21,12 @@ public struct InboxInvoice: Identifiable, Codable, Sendable {
     public var lastAccessedAt: Date? = nil
     public var documentKind: InvoiceDocumentKind? = nil
     public var documentReason: String? = nil
+    public var manuallyConfirmed: Bool? = nil
     public var documentPolicyRevision: Int? = nil
     public var autoDownloadPending: Bool? = nil
 
     public var isAcceptedInvoice: Bool {
-        documentKind == .invoice && documentPolicyRevision == InvoiceDocumentClassifier.policyRevision
+        documentPolicyRevision == InvoiceDocumentClassifier.policyRevision && (documentKind == .invoice || (documentKind == .unknown && manuallyConfirmed == true))
     }
 }
 
@@ -102,7 +103,7 @@ private struct InboxSnapshot: Codable {
                   !updated.contains(where: { $0.remote.map(remoteKey) == key }) else { continue }
             let name = URL(fileURLWithPath: attachment.filename).lastPathComponent
             let ext = URL(fileURLWithPath: name).pathExtension.lowercased()
-            guard ["pdf", "png", "jpg", "jpeg", "heic", "heif", "zip"].contains(ext) else { continue }
+            guard (InvoiceDocumentClassifier.supportedExtensions.contains(ext) || ext == "zip") else { continue }
             let id = UUID()
             var item = InboxInvoice(id: id, storedFilename: id.uuidString + "." + ext, originalFilename: name,
                 fingerprint: "remote:" + key, amount: InvoiceStore.amountInFilename(URL(fileURLWithPath: name).deletingPathExtension().lastPathComponent),
@@ -236,14 +237,11 @@ private struct InboxSnapshot: Codable {
         for index in updated.indices where !isDownloaded(updated[index]) && updated[index].documentPolicyRevision != InvoiceDocumentClassifier.policyRevision {
             updated[index].documentKind = nil
             updated[index].documentReason = nil
-            if !InvoiceDocumentClassifier.shouldList(filename: updated[index].originalFilename, subject: updated[index].source) {
-                updated[index].documentKind = .nonInvoice
-                updated[index].documentReason = "附件名称表明是行程、报销汇总或明细文件。"
-            }
+            updated[index].documentReason = "附件尚未下载，等待本地内容检查。"
         }
         do { try persist(updated); items = updated }
         catch { lastError = error.localizedDescription; return }
-        let ids = items.filter { isDownloaded($0) && ($0.documentPolicyRevision != InvoiceDocumentClassifier.policyRevision || ($0.amount ?? .zero) <= 0 || $0.buyerTitle.isEmpty) }.map(\.id)
+        let ids = items.filter { isDownloaded($0) && ($0.documentPolicyRevision != InvoiceDocumentClassifier.policyRevision || ($0.isAcceptedInvoice && (($0.amount ?? .zero) <= 0 || $0.buyerTitle.isEmpty))) }.map(\.id)
         for id in ids {
             guard !Task.isCancelled else { return }
             guard let item = items.first(where: { $0.id == id }), isDownloaded(item), !pendingIDs.contains(id) else { continue }
@@ -267,7 +265,7 @@ private struct InboxSnapshot: Codable {
             }
             return
         }
-        guard ["pdf", "png", "jpg", "jpeg", "heic", "heif"].contains(ext) else { throw failure("不支持的发票格式：\(name)") }
+        guard InvoiceDocumentClassifier.supportedExtensions.contains(ext) else { throw failure("不支持的发票格式：\(name)") }
         let fingerprint = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
         if let existing = items.first(where: { $0.fingerprint == fingerprint }) {
             guard existing.documentPolicyRevision != InvoiceDocumentClassifier.policyRevision else { return }
@@ -298,24 +296,14 @@ private struct InboxSnapshot: Codable {
 
     private func recognize(_ id: UUID, at destination: URL, namedAmount: Decimal?, metadataOnly: Bool = false) async throws {
         let filename = items.first(where: { $0.id == id })?.originalFilename ?? destination.lastPathComponent
-        let result: (text: String, buyer: String, seller: String, item: String, amount: Decimal?, kind: InvoiceDocumentKind, reason: String)
-        do {
-            result = try await Task.detached(priority: .userInitiated) {
-                let text = try InvoiceStore.invoiceText(at: destination)
-                let details = try InvoicePartyRecognition.details(at: destination, text: text)
-                let classification = InvoiceDocumentClassifier.classify(at: destination, text: text, filename: filename)
-                let amount = metadataOnly ? nil : try InvoiceAmountRecognition.total(at: destination, text: text)
-                return (text, details.buyer, details.seller, details.item, amount, classification.kind, classification.reason)
-            }.value
-        } catch {
-            if !metadataOnly, let index = items.firstIndex(where: { $0.id == id }) {
-                var updated = items
-                updated[index].warning = "文字识别失败，请核对金额和抬头，或重试下载识别。"
-                try persist(updated)
-                items = updated
-            }
-            throw failure("文件已下载，但文字识别失败，可重试识别或手动填写。")
-        }
+        let result: (text: String, buyer: String, seller: String, item: String, amount: Decimal?, kind: InvoiceDocumentKind, reason: String) = await Task.detached(priority: .userInitiated) {
+            let classification = InvoiceDocumentClassifier.classify(at: destination, text: "", filename: filename)
+            let text = classification.kind == .invoice ? ((try? InvoiceStore.invoiceText(at: destination)) ?? "") : ""
+            let details = classification.kind == .invoice
+                ? try? InvoicePartyRecognition.details(at: destination, text: text) : nil
+            let amount = metadataOnly || classification.kind != .invoice ? nil : try? InvoiceAmountRecognition.total(at: destination, text: text)
+            return (text, details?.buyer ?? "", details?.seller ?? "", details?.item ?? "", amount, classification.kind, classification.reason)
+        }.value
         guard let index = items.firstIndex(where: { $0.id == id }) else { return }
         var updated = items
         if !metadataOnly, !editedIDs.contains(id) {
@@ -327,10 +315,23 @@ private struct InboxSnapshot: Codable {
         }
         if !metadataOnly || updated[index].sellerTitle.isEmpty { updated[index].sellerTitle = result.seller }
         if !metadataOnly || updated[index].itemDescription.isEmpty { updated[index].itemDescription = result.item }
-        if !metadataOnly { updated[index].warning = (updated[index].amount ?? .zero) > 0 ? nil : "未识别到价税合计，请手动填写。" }
+        if !metadataOnly { updated[index].warning = result.kind == .invoice && (updated[index].amount ?? .zero) <= 0 ? "未识别到价税合计，请手动填写。" : nil }
+        if updated[index].documentPolicyRevision != InvoiceDocumentClassifier.policyRevision { updated[index].manuallyConfirmed = nil }
         updated[index].documentKind = result.kind
         updated[index].documentReason = result.reason
         updated[index].documentPolicyRevision = InvoiceDocumentClassifier.policyRevision
+        try persist(updated)
+        items = updated
+    }
+
+    public func confirmInvoice(_ id: UUID) throws {
+        guard let index = items.firstIndex(where: { $0.id == id }),
+              items[index].documentKind == .unknown,
+              items[index].documentPolicyRevision == InvoiceDocumentClassifier.policyRevision,
+              !pendingIDs.contains(id), isDownloaded(items[index]) else { return }
+        var updated = items
+        updated[index].manuallyConfirmed = true
+        updated[index].warning = (updated[index].amount ?? .zero) > 0 ? nil : "请填写发票金额。"
         try persist(updated)
         items = updated
     }
@@ -362,7 +363,7 @@ private struct InboxSnapshot: Codable {
         let selected = items.filter { ids.contains($0.id) }
         guard selected.count == ids.count else { throw failure("部分发票不存在，请刷新后重试。") }
         guard selected.allSatisfy({ $0.isAcceptedInvoice }) else {
-            throw failure("所选附件未通过电子普通发票自动检查，不能加入项目。")
+            throw failure("所选附件未通过受支持电子发票自动检查，不能加入项目。")
         }
         guard selected.allSatisfy({ isDownloaded($0) && !$0.fingerprint.hasPrefix("remote:") }) else {
             throw failure("请先下载所选发票并完成识别，下载中断的发票可点击预览重试。")
@@ -405,7 +406,7 @@ private struct InboxSnapshot: Codable {
                 try FileManager.default.copyItem(at: sourceURL(for: item), to: projectFiles.appendingPathComponent(stored))
                 projectInvoice = Invoice(id: id, storedFilename: stored, originalFilename: item.originalFilename,
                                          fingerprint: item.fingerprint, amount: item.amount, warning: item.warning,
-                                         documentKind: .invoice, documentPolicyRevision: InvoiceDocumentClassifier.policyRevision)
+                                         documentKind: item.documentKind, documentReason: item.documentReason, manuallyConfirmed: item.manuallyConfirmed, documentPolicyRevision: InvoiceDocumentClassifier.policyRevision)
                 projectInvoices.append(projectInvoice)
             }
             if let index = updated.firstIndex(where: { $0.id == item.id }) {
@@ -507,7 +508,7 @@ private struct InboxSnapshot: Codable {
             guard size <= 40 * 1024 * 1024 else { throw error() }
             total += size
             guard total <= 100 * 1024 * 1024 else { throw error() }
-            if ["pdf", "png", "jpg", "jpeg", "heic", "heif"].contains(URL(fileURLWithPath: name).pathExtension.lowercased()), !name.hasSuffix("/") { names.append(name) }
+            if InvoiceDocumentClassifier.supportedExtensions.contains(URL(fileURLWithPath: name).pathExtension.lowercased()), !name.hasSuffix("/") { names.append(name) }
             position += 46 + nameLength + extra + comment
         }
         guard !names.isEmpty, Set(names).count == names.count else { throw error() }

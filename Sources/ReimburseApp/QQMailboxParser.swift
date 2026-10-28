@@ -50,7 +50,7 @@ enum QQMailboxParser {
         var parts: [Part] = []
         collect(structure, prefix: "", into: &parts)
         let isInvoice = subject.contains("发票") || subject.lowercased().contains("invoice")
-        let supported = Set(["pdf", "png", "jpg", "jpeg", "heic", "heif", "zip"])
+        let supported = InvoiceDocumentClassifier.supportedExtensions.union(["zip"])
         let attachments = parts.compactMap { part -> InvoiceMailAttachment? in
             let filename = (part.filename as NSString).lastPathComponent
             let ext = (filename as NSString).pathExtension.lowercased()
