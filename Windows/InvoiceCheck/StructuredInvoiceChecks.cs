@@ -15,6 +15,11 @@ internal static class StructuredInvoiceChecks
         var source = Path.Combine(root, "invoice.xml"); File.WriteAllText(source, xml);
         var reading = InvoiceRecognition.Read(source, "unused");
         Check(reading.Accepted && reading.Amount == 106m && reading.Buyer == "测试购买企业", "XML structure and metadata parsed");
+        File.WriteAllText(source, xml.Replace("普通发票", "增值税专用发票"));
+        Check(InvoiceRecognition.Read(source, "unused").Accepted, "Digital special with verified fields accepted");
+        var canonicalSpecial = LocalInvoiceContent.Read(source).Text;
+        Check(InvoiceRecognition.ClassifyKind(canonicalSpecial).kind == InvoiceDocumentKind.Invoice, "Special natural text uses strict field validation");
+        Check(InvoiceRecognition.ClassifyKind(canonicalSpecial.Replace("税额合计：6.00", "税额合计：7.00")).kind == InvoiceDocumentKind.Unknown, "Special mismatched tax stays uncertain");
         File.WriteAllText(source, xml.Replace("106.00", "107.00"));
         Check(InvoiceRecognition.Read(source, "unused").Kind == InvoiceDocumentKind.Unknown, "XML mismatched arithmetic uncertain");
         File.WriteAllText(source, "<!DOCTYPE Invoice [<!ENTITY x SYSTEM 'file:///etc/passwd'>]>" + xml.Replace("测试购买企业", "&x;"));

@@ -50,7 +50,7 @@ public static class InvoiceRecognition
         var lines = normalized.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries).Select(Compact).Where(x => x.Length > 0).Take(12).ToList();
         var source = Compact(normalized);
         if (source.Length == 0) return (InvoiceDocumentKind.Unknown, "尚未取得可识别的票面内容，保留待确认。");
-        var title = lines.FindIndex(InvoiceTitle);
+        var title = lines.FindIndex(EstablishedInvoiceTitle);
         var supporting = lines.FindIndex(line => Supporting.Any(line.Contains));
         if (supporting >= 0 && (title < 0 || supporting <= title)) return (InvoiceDocumentKind.NonInvoice, "票面标题为行程、报销或明细材料，不作为发票计入。");
         var number = (source.Contains("发票号码") || source.Contains("发票号")) && Regex.IsMatch(normalized, @"(?<![0-9])[0-9]{8,20}(?![0-9])");
@@ -59,15 +59,19 @@ public static class InvoiceRecognition
             return (InvoiceDocumentKind.Invoice, "已按稳定本地规则识别为目标电子发票，关键票面字段齐全。");
         if (title < 0 && new[] { "非发票", "不作为发票", "不能作为发票" }.Any(source.Contains))
             return (InvoiceDocumentKind.NonInvoice, "文件明确注明非发票。");
-        return (InvoiceDocumentKind.Unknown, "本地无法确认电子发票，等待AI兜底或人工确认。");
+        var extended = VerifyStructured(text);
+        return extended.kind == InvoiceDocumentKind.Invoice ? extended : (InvoiceDocumentKind.Unknown, "本地无法确认电子发票，等待AI兜底或人工确认。");
     }
 
     internal static (InvoiceDocumentKind kind, string reason) VerifyStructured(string text)
     {
-        var result = ClassifyKind(text);
-        if (result.kind != InvoiceDocumentKind.Invoice) return result;
-        var lines = text.Normalize(NormalizationForm.FormKC).Split('\n').Select(Compact).ToList();
-        var title = lines.FirstOrDefault(InvoiceTitle) ?? "";
+        var lines = text.Normalize(NormalizationForm.FormKC).Split('\n').Select(Compact).Where(l => l.Length > 0).ToList();
+        var head = lines.Take(12).ToList();
+        var invoiceIndex = head.FindIndex(InvoiceTitle);
+        var supportingIndex = head.FindIndex(line => Supporting.Any(line.Contains));
+        if (supportingIndex >= 0 && (invoiceIndex < 0 || supportingIndex <= invoiceIndex)) return (InvoiceDocumentKind.NonInvoice, "票面标题为非目标附件。");
+        if (invoiceIndex < 0 || head.Where(InvoiceTitle).Distinct().Count() != 1) return (InvoiceDocumentKind.Unknown, "未找到唯一的白名单票种标题。");
+        var title = head[invoiceIndex];
         string Field(string label) => lines.FirstOrDefault(l => l.StartsWith(label + ":"))?[(label.Length + 1)..] ?? "";
         var digital = title.StartsWith("电子发票");
         if (!Regex.IsMatch(Field("发票号码"), digital ? @"^\d{20}$" : @"^\d{8}$") || !digital && !Regex.IsMatch(Field("发票代码"), @"^(?:\d{10}|\d{12})$"))
@@ -86,8 +90,15 @@ public static class InvoiceRecognition
         return (InvoiceDocumentKind.Invoice, "结构化发票票种、号码、日期、双方字段与价税合计校验通过。");
     }
 
-    private static bool InvoiceTitle(string line) => !new[] { "说明", "申请", "清单", "汇总", "报销单", "报销明细", "操作指南" }.Any(line.Contains)
-        && Regex.IsMatch(line, @"^(?:[\u3400-\u9fff]{0,12})?(?:增值税电子(?:普通|专用)发票|电子发票[（(]?(?:普通|(?:增值税)?专用)发票[）)]?)");
+    private static bool EstablishedInvoiceTitle(string line) => !new[] { "说明", "申请", "清单", "汇总", "报销单", "报销明细", "操作指南" }.Any(line.Contains)
+        && Regex.IsMatch(line, @"^(?:[\u3400-\u9fff]{0,12})?(?:增值税电子普通发票|电子发票[（(]?普通发票[）)]?)");
+
+    private static bool InvoiceTitle(string line)
+    {
+        if (new[] { "说明", "申请", "清单", "汇总", "报销单", "报销明细", "操作指南" }.Any(line.Contains)) return false;
+        var title = line.Replace("(", "").Replace(")", "");
+        return Regex.IsMatch(title, @"^(?:电子发票(?:普通发票|增值税专用发票|专用发票)|[\u3400-\u9fff]{0,12}增值税电子(?:普通|专用)发票)$");
+    }
     private static string Compact(string text) => string.Concat(text.Normalize(NormalizationForm.FormKC).ToLowerInvariant().Where(c => !char.IsWhiteSpace(c)));
 
     public static decimal? AmountInFilename(string filename)

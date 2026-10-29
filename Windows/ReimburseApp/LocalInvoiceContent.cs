@@ -20,7 +20,14 @@ internal static class LocalInvoiceContent
             XElement Xml(string name)
             {
                 if (!entries.TryGetValue(name, out var entry) || !name.EndsWith(".xml", StringComparison.OrdinalIgnoreCase) || entry.Length > 2 * 1024 * 1024 || (budget -= entry.Length) < 0) throw new InvalidDataException();
-                using var stream = entry.Open(); using var buffer = new MemoryStream(); stream.CopyTo(buffer);
+                using var stream = entry.Open(); using var buffer = new MemoryStream();
+                var chunk = new byte[16384]; int count;
+                while ((count = stream.Read(chunk, 0, chunk.Length)) > 0)
+                {
+                    if (buffer.Length + count > 2 * 1024 * 1024 || buffer.Length + count > entry.Length) throw new InvalidDataException();
+                    buffer.Write(chunk, 0, count);
+                }
+                if (buffer.Length != entry.Length) throw new InvalidDataException();
                 return Parse(buffer.ToArray());
             }
             string Resolve(string value, string from)

@@ -14,8 +14,9 @@ Check(!InvoiceRecognition.Classify(ordinary.Replace("销售方信息", "")).acce
 Check(InvoiceRecognition.Classify(ordinary.Replace("电子发票（普通发票）", "增值税电子普通发票")).accepted, "Legacy ordinary title");
 Check(InvoiceRecognition.ShouldList("滴滴行程单.pdf", "电子发票"), "Filename selects candidates; content decides classification");
 Check(InvoiceRecognition.ClassifyKind("滴滴行程单\n发票号码12345678901234567890\n税额1.00").kind == InvoiceDocumentKind.NonInvoice, "Itinerary distinguished by content");
-Check(InvoiceRecognition.Classify(ordinary.Replace("普通发票", "专用发票")).accepted, "Digital special invoice supported");
-Check(InvoiceRecognition.Classify(ordinary.Replace("电子发票（普通发票）", "增值税电子专用发票")).accepted, "Legacy special invoice supported");
+Check(InvoiceRecognition.ClassifyKind(ordinary.Replace("普通发票", "专用发票")).kind == InvoiceDocumentKind.Unknown, "Digital special missing critical fields stays uncertain");
+Check(InvoiceRecognition.ClassifyKind(ordinary.Replace("普通发票", "增值税专用发票")).kind == InvoiceDocumentKind.Unknown, "Digital VAT special missing critical fields stays uncertain");
+Check(InvoiceRecognition.ClassifyKind(ordinary.Replace("电子发票（普通发票）", "增值税电子专用发票")).kind == InvoiceDocumentKind.Unknown, "Legacy special missing critical fields stays uncertain");
 Check(InvoiceRecognition.ClassifyKind("发票号码12345678901234567890 税额1.00").kind == InvoiceDocumentKind.Unknown, "Loose labels cannot admit invoice");
 var pendingReading = new InvoiceReading(false, "local uncertain", null, "", "", "");
 Check(InvoiceAIFallback.Apply(pendingReading, new("digital_general", true, "high", "完整票面", "")).Accepted, "Definitive AI does not require local verification");
