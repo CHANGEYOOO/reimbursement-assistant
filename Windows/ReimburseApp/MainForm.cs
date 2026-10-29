@@ -304,6 +304,7 @@ public sealed class MainForm : Form
         panel.Controls.Add(date, 1, 0);
 
         var nameBox = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 4, ColumnCount = 1 };
+        nameBox.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         nameBox.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
         nameBox.RowStyles.Add(new RowStyle(SizeType.Absolute, 116));
         nameBox.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));
@@ -357,6 +358,7 @@ public sealed class MainForm : Form
         panel.Controls.Add(image, 3, 0);
 
         var amountBox = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3 };
+        amountBox.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         amountBox.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
         amountBox.RowStyles.Add(new RowStyle(SizeType.Absolute, 22));
         amountBox.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
@@ -638,10 +640,11 @@ public sealed class MainForm : Form
         var reloaded = new ProjectStore();
         if (reloaded.Projects.Single().Expenses.Single().Amount != 39m) throw new InvalidOperationException("自动保存读取不一致");
         Size = MinimumSize; Application.DoEvents();
+        using (var screenshot = new Bitmap(Width, Height)) { DrawToBitmap(screenshot, new Rectangle(Point.Empty, Size)); screenshot.Save("build/windows-orders-smoke.png", ImageFormat.Png); }
         var compactRow = _controls[row.Id];
         var purposeRequired = TextRenderer.MeasureText("道具采购费用", compactRow.Purpose.Font).Width + 12;
         if (compactRow.Purpose.ClientSize.Width < purposeRequired || compactRow.Purpose.Right > compactRow.Purpose.Parent!.ClientSize.Width)
-            throw new InvalidOperationException($"用途输入空间不足：width={compactRow.Purpose.ClientSize.Width}, required={purposeRequired}, row={compactRow.Panel.Size}");
+            throw new InvalidOperationException($"用途输入空间不足：width={compactRow.Purpose.ClientSize.Width}, required={purposeRequired}, right={compactRow.Purpose.Right}, parent={compactRow.Purpose.Parent!.ClientSize}, row={compactRow.Panel.Size}");
         if (compactRow.Confirmed.PreferredSize.Width > compactRow.Confirmed.Width || compactRow.Confirmed.Right > compactRow.Confirmed.Parent!.ClientSize.Width)
             throw new InvalidOperationException($"人工核对未完整显示：bounds={compactRow.Confirmed.Bounds}, preferred={compactRow.Confirmed.PreferredSize}, parent={compactRow.Confirmed.Parent!.ClientSize}");
         if (compactRow.Candidates.Controls.Cast<Control>().Any(control => control.Right > compactRow.Candidates.ClientSize.Width)) throw new InvalidOperationException("金额候选按钮超出可见区域");
