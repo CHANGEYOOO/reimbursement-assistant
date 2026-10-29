@@ -10,7 +10,7 @@
 
 ### Mac 版
 
-[下载 Mac 1.27 安装包](https://github.com/CHANGEYOOO/reimbursement-assistant/releases/download/v1.27.0/ReimbursementAssistant-macOS-1.27.dmg)
+[下载 Mac 1.34 安装包](https://github.com/CHANGEYOOO/reimbursement-assistant/releases/download/v1.34.0/ReimbursementAssistant-macOS-1.34.dmg)
 
 适用于 **Apple 芯片的 Mac，需 macOS 15 或更新版本**。
 
@@ -24,7 +24,7 @@
 
 请到 [全部版本下载页面](https://github.com/CHANGEYOOO/reimbursement-assistant/releases) 查找 Windows 安装包。
 
-Windows 版暂未同步 Mac 的最新功能，以下说明主要适用于 Mac 1.27。
+Windows 版暂未同步 Mac 的最新功能，以下说明主要适用于 Mac 1.34。
 
 ## 快速开始
 
@@ -40,7 +40,7 @@ Windows 版暂未同步 Mac 的最新功能，以下说明主要适用于 Mac 1.
 
 - **金额不确定：**点击正确的候选金额，或直接手动填写。
 - **用途不合适：**修改分类或用途文字。选择分类后会自动填写对应的用途名称。
-- **需要查看原图：**选中订单查看右侧截图，点击图片可以放大。
+- **需要查看原图：**选中订单查看右侧截图，可调整预览宽度和缩放。
 - **需要调整顺序：**按住订单所在行拖动。
 - **导入错误：**点击该行的删除按钮。
 
@@ -70,7 +70,7 @@ Windows 版暂未同步 Mac 的最新功能，以下说明主要适用于 Mac 1.
 
 报销单会自动保存在当前电脑，不需要每次手动保存。
 
-下次打开软件可以继续编辑，也可以通过“打开 / 管理报销单”查找、重命名或删除之前的报销单。
+下次打开软件可以继续编辑，也可以在左侧项目列表中查找、重命名或删除之前的报销单。
 
 导入的截图会复制到报销单中，软件不会修改原始文件。自动保存不是云端备份，重要资料建议另行备份。
 

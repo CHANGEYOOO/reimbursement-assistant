@@ -9,5 +9,11 @@
     <PackageReference Include="ClosedXML" Version="0.105.0" />
     <PackageReference Include="Tesseract" Version="5.2.0" />
     <Compile Include="../ReimburseApp/Recognition.cs" Link="Recognition.cs" />
+    <Compile Include="../ReimburseApp/SemanticClassifier.cs" Link="SemanticClassifier.cs" />
+    <Compile Include="../ReimburseApp/ExpenseRow.cs" Link="ExpenseRow.cs" />
+    <Compile Include="../ReimburseApp/ProjectStore.cs" Link="ProjectStore.cs" />
+    <Compile Include="../ReimburseApp/GitHubReleaseRules.cs" Link="GitHubReleaseRules.cs" />
+    <None Include="../Fixtures/OrderRecognitionParity.json" Link="OrderRecognitionParity.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="../Fixtures/PositionRecognitionParity.json" Link="PositionRecognitionParity.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>
