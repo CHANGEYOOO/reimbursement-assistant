@@ -104,7 +104,7 @@ public sealed class MainForm : Form
         var previewBox = new Panel { Dock = DockStyle.Fill, Padding = new Padding(8), BackColor = Color.FromArgb(246, 248, 250) };
         _previewScroll.Controls.Add(_preview);
         previewBox.Controls.Add(_previewScroll);
-        var zoomTools = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 34, Name = "previewZoom" };
+        var zoomTools = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = true, Name = "previewZoom" };
         foreach (var (text, change) in new[] { ("−", -0.5), ("适合宽度", 0.0), ("+", 0.5) })
         {
             var button = new Button { Text = text, Width = change == 0 ? 85 : 30, Height = 28, Margin = new Padding(2) };
@@ -190,11 +190,11 @@ public sealed class MainForm : Form
 
     private static void SetColumns(TableLayoutPanel panel)
     {
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 72));
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 125));
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 58));
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 112));
         panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 66));
         panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 110));
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 145));
     }
 
     private void ChooseImages()
@@ -283,13 +283,13 @@ public sealed class MainForm : Form
         SetColumns(panel);
         var numberBox = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false };
         var number = new Label { AutoSize = true, Text = (_expenses.Count).ToString(CultureInfo.InvariantCulture), Margin = new Padding(2, 5, 0, 7) };
-        var delete = new Button { Text = "删除", Width = 64, Height = 30, Font = new Font(Font.FontFamily, 8.5f), Margin = Padding.Empty };
+        var delete = new Button { Text = "删除", Width = 48, Height = 30, Font = new Font(Font.FontFamily, 8.5f), Margin = Padding.Empty };
         delete.Click += (_, _) => Delete(row);
         numberBox.Controls.Add(number);
         numberBox.Controls.Add(delete);
         panel.Controls.Add(numberBox, 0, 0);
 
-        var date = new TextBox { Text = row.Date, Width = 112, PlaceholderText = "年-月-日", Margin = new Padding(0, 5, 4, 0) };
+        var date = new TextBox { Text = row.Date, Dock = DockStyle.Top, PlaceholderText = "年-月-日", Margin = new Padding(0, 5, 4, 0) };
         date.TextChanged += (_, _) => {
             if (_settingValues) return;
             Remember();
@@ -360,7 +360,7 @@ public sealed class MainForm : Form
         amountBox.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
         amountBox.RowStyles.Add(new RowStyle(SizeType.Absolute, 22));
         amountBox.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        var amount = new TextBox { Text = row.Amount?.ToString("0.00", CultureInfo.InvariantCulture) ?? "", Width = 145, PlaceholderText = "金额", Margin = new Padding(0, 5, 0, 0) };
+        var amount = new TextBox { Text = row.Amount?.ToString("0.00", CultureInfo.InvariantCulture) ?? "", Dock = DockStyle.Top, PlaceholderText = "金额", Margin = new Padding(0, 5, 0, 0) };
         amount.TextChanged += (_, _) =>
         {
             if (_settingValues) return;
@@ -373,6 +373,7 @@ public sealed class MainForm : Form
         var candidateHint = new Label { Text = "点击选择金额", AutoSize = true, ForeColor = Color.DimGray, Visible = false };
         amountBox.Controls.Add(candidateHint, 0, 1);
         var candidates = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false, AutoScroll = true, Visible = false };
+        candidates.Resize += (_, _) => { foreach (Control button in candidates.Controls) button.Width = CandidateWidth(candidates); };
         amountBox.Controls.Add(candidates, 0, 2);
         panel.Controls.Add(amountBox, 4, 0);
 
@@ -433,7 +434,7 @@ public sealed class MainForm : Form
             ui.Candidates.Controls.Clear();
             foreach (var candidate in row.AmountCandidates)
             {
-                var button = new Button { Width = 137, Height = 26, Margin = new Padding(0, 0, 0, 2) };
+                var button = new Button { Width = CandidateWidth(ui.Candidates), Height = 26, Margin = new Padding(0, 0, 0, 2) };
                 var tip = new ToolTip();
                 tip.SetToolTip(button, candidate.Source);
                 button.Disposed += (_, _) => tip.Dispose();
@@ -563,6 +564,7 @@ public sealed class MainForm : Form
         for (var i = 0; i < _expenses.Count; i++) _controls[_expenses[i].Id].Number.Text = (i + 1).ToString(CultureInfo.InvariantCulture);
     }
 
+    private static int CandidateWidth(FlowLayoutPanel panel) => Math.Max(1, panel.ClientSize.Width - panel.Padding.Horizontal - SystemInformation.VerticalScrollBarWidth - 2);
     private int RowWidth() => Math.Max(1, _rows.ClientSize.Width - _rows.Padding.Horizontal - SystemInformation.VerticalScrollBarWidth - 2);
     private void ResizeRows() { foreach (var ui in _controls.Values) ui.Panel.Width = RowWidth(); }
 
@@ -636,6 +638,13 @@ public sealed class MainForm : Form
         var reloaded = new ProjectStore();
         if (reloaded.Projects.Single().Expenses.Single().Amount != 39m) throw new InvalidOperationException("自动保存读取不一致");
         Size = MinimumSize; Application.DoEvents();
+        var compactRow = _controls[row.Id];
+        var purposeRequired = TextRenderer.MeasureText("道具采购费用", compactRow.Purpose.Font).Width + 12;
+        if (compactRow.Purpose.ClientSize.Width < purposeRequired || compactRow.Purpose.Right > compactRow.Purpose.Parent!.ClientSize.Width)
+            throw new InvalidOperationException($"用途输入空间不足：width={compactRow.Purpose.ClientSize.Width}, required={purposeRequired}, row={compactRow.Panel.Size}");
+        if (compactRow.Confirmed.PreferredSize.Width > compactRow.Confirmed.Width || compactRow.Confirmed.Right > compactRow.Confirmed.Parent!.ClientSize.Width)
+            throw new InvalidOperationException($"人工核对未完整显示：bounds={compactRow.Confirmed.Bounds}, preferred={compactRow.Confirmed.PreferredSize}, parent={compactRow.Confirmed.Parent!.ClientSize}");
+        if (compactRow.Candidates.Controls.Cast<Control>().Any(control => control.Right > compactRow.Candidates.ClientSize.Width)) throw new InvalidOperationException("金额候选按钮超出可见区域");
         var categoryActions = _controls[row.Id].Category.Parent!;
         if (categoryActions.Controls.Cast<Control>().Any(control => control.Right > categoryActions.ClientSize.Width || control.Bottom > categoryActions.ClientSize.Height)) throw new InvalidOperationException("订单分类或 AI 按钮被遮挡");
         using (var screenshot = new Bitmap(Width, Height)) { DrawToBitmap(screenshot, new Rectangle(Point.Empty, Size)); screenshot.Save("build/windows-orders-smoke.png", ImageFormat.Png); }

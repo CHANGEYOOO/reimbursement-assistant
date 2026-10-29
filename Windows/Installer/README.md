@@ -32,7 +32,7 @@ dotnet publish Windows/Installer/Installer.csproj -c Release -r win-x64 --self-c
 可在 Windows 构建机器上执行安装包的隔离自检：
 
 ```powershell
-$process = Start-Process -FilePath ".\build\windows-installer\报销单助手-安装程序-1.27.exe" -ArgumentList @('--self-check', 'C:\Temp\installer-check.json') -Wait -PassThru
+$process = Start-Process -FilePath ".\build\windows-installer\报销单助手-安装程序-1.34.exe" -ArgumentList @('--self-check', 'C:\Temp\installer-check.json') -Wait -PassThru
 if ($process.ExitCode -ne 0) { throw "Installer payload self-check failed" }
 Get-Content C:\Temp\installer-check.json
 ```

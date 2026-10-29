@@ -24,7 +24,7 @@
 
 请到 [全部版本下载页面](https://github.com/CHANGEYOOO/reimbursement-assistant/releases) 查找 Windows 安装包。
 
-Windows 版暂未同步 Mac 的最新功能，以下说明主要适用于 Mac 1.34。
+Windows 源码已同步 Mac 1.34 的功能流程与业务规则；安装包请以下载页面实际提供的版本为准。
 
 ## 快速开始
 
