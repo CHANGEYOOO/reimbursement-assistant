@@ -170,6 +170,8 @@ public sealed class MainForm : Form
         LoadProject(_store.Projects.FirstOrDefault(project => project.Id == _store.LastSelectedId) ?? _store.Projects[0]);
         Shown += async (_, _) =>
         {
+            _orderSplit.Panel1MinSize = 650;
+            _orderSplit.Panel2MinSize = 240;
             _orderSplit.SplitterDistance = Math.Max(650, _orderSplit.Width - 285);
             if (_selfCheck) return;
             if (Environment.GetCommandLineArgs().Contains("--background")) Hide();
@@ -561,7 +563,7 @@ public sealed class MainForm : Form
         for (var i = 0; i < _expenses.Count; i++) _controls[_expenses[i].Id].Number.Text = (i + 1).ToString(CultureInfo.InvariantCulture);
     }
 
-    private int RowWidth() => Math.Max(520, _rows.ClientSize.Width - 6);
+    private int RowWidth() => Math.Max(1, _rows.ClientSize.Width - _rows.Padding.Horizontal - SystemInformation.VerticalScrollBarWidth - 2);
     private void ResizeRows() { foreach (var ui in _controls.Values) ui.Panel.Width = RowWidth(); }
 
     private string? Blocker()
@@ -636,7 +638,8 @@ public sealed class MainForm : Form
         Size = MinimumSize; Application.DoEvents();
         var categoryActions = _controls[row.Id].Category.Parent!;
         if (categoryActions.Controls.Cast<Control>().Any(control => control.Right > categoryActions.ClientSize.Width || control.Bottom > categoryActions.ClientSize.Height)) throw new InvalidOperationException("订单分类或 AI 按钮被遮挡");
-        if (_rows.HorizontalScroll.Visible) throw new InvalidOperationException("订单栏目超出可见宽度");
+        using (var screenshot = new Bitmap(Width, Height)) { DrawToBitmap(screenshot, new Rectangle(Point.Empty, Size)); screenshot.Save("build/windows-orders-smoke.png", ImageFormat.Png); }
+        if (_rows.HorizontalScroll.Visible) throw new InvalidOperationException($"订单栏目超出可见宽度：window={Size}, split={_orderSplit.Size}, left={_orderSplit.Panel1.ClientSize}, rows={_rows.ClientSize}, display={_rows.DisplayRectangle}, row={_controls[row.Id].Panel.Size}, requested={RowWidth()}, padding={_rows.Padding}, scroll={_rows.HorizontalScroll.Maximum}");
         if (_controls[row.Id].Panel.Height < 200) throw new InvalidOperationException("订单操作区域高度不足");
         var zoom = _orderSplit.Panel2.Controls.Find("previewZoom", true).Single();
         if (zoom.Controls.Cast<Control>().Any(control => control.Right > zoom.ClientSize.Width || control.Bottom > zoom.ClientSize.Height)) throw new InvalidOperationException("截图缩放按钮被遮挡");
