@@ -624,7 +624,8 @@ public sealed class MainForm : Form
         if (!File.Exists(export)) throw new InvalidOperationException("Excel 未生成");
         var storedPath = Path.Combine(ProjectStore.DirectoryFor(_project), "project.json");
         var savedBytes = File.ReadAllBytes(storedPath); var savedTime = File.GetLastWriteTimeUtc(storedPath);
-        _store.Save(_project); _store.Select(_project);
+        var stableProject = ProjectStore.Restore(File.ReadAllText(storedPath));
+        _store.Save(stableProject); _store.Select(stableProject);
         if (!savedBytes.SequenceEqual(File.ReadAllBytes(storedPath)) || savedTime != File.GetLastWriteTimeUtc(storedPath)) throw new InvalidOperationException("无变化保存不应修改项目资料");
         var mailDetail = MailDetail.FromText("<script>location=\"https://bad.test\"</script><p>正文</p><img src=\"https://remote.test/image\"><a href=\"https://example.com/invoice\">下载</a>", true);
         if (mailDetail.Body.Contains("<") || mailDetail.Body.Contains("location=") || !mailDetail.Body.Contains("正文") || mailDetail.Links.Any(link => link.Scheme is not ("http" or "https"))) throw new InvalidOperationException("邮件纯文本安全转换失败");

@@ -77,7 +77,7 @@ public static class InvoiceRecognition
         foreach (var party in new[] { "购买方信息", "销售方信息" })
         {
             var start = lines.IndexOf(party);
-            if (start < 0 || start + 2 >= lines.Count || !lines[start + 1].StartsWith("名称:") || lines[start + 1].Length < 5 || !Regex.IsMatch(lines[start + 2], @"^纳税人识别号:[0-9A-Z]{15}(?:[0-9A-Z]{3})?$"))
+            if (start < 0 || start + 2 >= lines.Count || !lines[start + 1].StartsWith("名称:") || lines[start + 1].Length < 5 || !Regex.IsMatch(lines[start + 2], @"^纳税人识别号:[0-9A-Za-z]{15}(?:[0-9A-Za-z]{3})?$"))
                 return (InvoiceDocumentKind.Unknown, "购买方或销售方关键字段无法验证。");
         }
         if (!decimal.TryParse(Field("不含税金额"), NumberStyles.Number, CultureInfo.InvariantCulture, out var net) || !decimal.TryParse(Field("税额合计"), NumberStyles.Number, CultureInfo.InvariantCulture, out var tax) || !decimal.TryParse(Field("价税合计(小写)"), NumberStyles.Number, CultureInfo.InvariantCulture, out var total)
@@ -87,7 +87,7 @@ public static class InvoiceRecognition
     }
 
     private static bool InvoiceTitle(string line) => !new[] { "说明", "申请", "清单", "汇总", "报销单", "报销明细", "操作指南" }.Any(line.Contains)
-        && Regex.IsMatch(line, @"^(?:[\u3400-\u9fff]{0,12})?(?:增值税电子(?:普通|专用)发票|电子发票[（(]?(?:普通|专用)发票[）)]?)");
+        && Regex.IsMatch(line, @"^(?:[\u3400-\u9fff]{0,12})?(?:增值税电子(?:普通|专用)发票|电子发票[（(]?(?:普通|(?:增值税)?专用)发票[）)]?)");
     private static string Compact(string text) => string.Concat(text.Normalize(NormalizationForm.FormKC).ToLowerInvariant().Where(c => !char.IsWhiteSpace(c)));
 
     public static decimal? AmountInFilename(string filename)
