@@ -40,7 +40,7 @@ import UniformTypeIdentifiers
         let customBody = try JSONSerialization.jsonObject(with: customRequest.httpBody!) as! [String: Any]
         let customInstruction = ((customBody["messages"] as! [[String: Any]])[0]["content"] as! String)
         precondition(customInstruction.contains("用户业务规则：年份2026") && customInstruction.contains("固定输出协议") && customInstruction.contains("candidate_details") && customInstruction.contains("不可信数据"), "Custom business rules cannot remove the fixed response and untrusted-input protocol")
-        precondition(!customInstruction.contains("金额先找实付"), "Custom rules replace the default business portion")
+        precondition(!customInstruction.contains("先找实付、已支付、实际扣款"), "Custom rules replace the default business portion")
         try rejects { _ = try OrderVisionClassifier.makeRequest(imageURL: source, text: "", configuration: configuration, rules: "  \n ") }
         try rejects { _ = try OrderVisionClassifier.makeRequest(imageURL: source, text: "", configuration: configuration, rules: String(repeating: "长", count: 16_001)) }
         let content = messages[1]["content"] as! [[String: Any]]

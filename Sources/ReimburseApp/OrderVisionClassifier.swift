@@ -11,7 +11,7 @@ enum OrderVisionClassifier {
         图片为主、OCR为辅助；OCR可能漏字或顺序错误。图片按从上到下分段，属于同一张完整截图，不能当成多笔订单重复计数。不得编造图中看不清的内容。
         先判断页面类型page_type：payment_detail支付详情、order_detail订单详情、order_list多笔订单列表、refund_detail退款详情、other其他/无法判断。分段长图仍是一单；页面确有多笔交易时不能选一个大数字冒充整单支出。
         按本单实际商品或服务分类，商品明细优先于商户名和平台；忽略广告、推荐、导航和地址。交通为出行/停车/通行/运输；餐食为一切可食用饮用的商品；住宿为酒店民宿；道具采购为不可食用实物/器材/用品/耗材，不包括租赁维修服务；其他为确定不属于以上类别的服务支出；证据不足或混合类别无法归一时为待分类。不能仅按单一关键词猜测。
-        金额先找实付、已支付、实际扣款等支付标签，再结合数字与标签的同行/邻近位置及所属区域判断；字号只作辅助，不能取最大或最醒目的数字。区分原价、优惠、运费、小计，不把商品推荐区或其他订单的金额混入。金额必须完整可见，不得加减计算、拼接或从订单号/日期截取。负数扣款取绝对值。
+        金额以整笔订单的实付总金额为准，先找实付、已支付、实际扣款等支付标签，再结合数字与标签的同行/邻近位置及所属区域判断；字号只作辅助，不能取最大或最醒目的数字。区分原价、优惠、运费、小计，不把商品推荐区或其他订单的金额混入。金额必须完整可见，不得加减计算、拼接或从订单号/日期截取。负数扣款取绝对值。
         payment.state区分paid已付款、refund_entry仅有申请退款/退款入口按钮、refund_processing退款处理中、full_refund全额退款成功、partial_refund部分退款、split_payment分次支付、unknown无法判断。仅出现“退款”入口不等于退款成功，不能据此排除正常支出。退款/收入/到账不作为支出；全额退款必须排除。部分退款、退款处理中、分次支付和订单列表先保留待确认，不能自行计算净支出或合计。
         payment.direction仅expense/refund/income/uncertain。只在明确唯一实际支出、状态与页面一致时payment.certainty=high并填amount；否则amount=null，候选最多6个，只保留图中可能是实际支出的完整数字。退款/收入候选必须为空。payment.evidence用简短文字说明可核对的标签、位置及排除其他金额的原因；candidate_details逐一标明候选来源，例如“实付候选”“订单合计”，每个amount必须属于amount或candidates，label不超过60字，不编造证据。
         独立总结用途purpose，不必把用途名称限制为固定分类费用。优先实际商品或服务、实质性的转账备注，其次账单说明、实际商户信息；忽略支付平台、收单机构、银行、地址与广告。只有商户名时可概括“某便利店消费”“某商店消费”，用途可明确而分类仍为待分类，不得猜测购买了食品或日用品。转账备注写明“场地定金”就概括为“场地定金”；只有转账事实可概括“转账付款”，不猜借款或报销。具体商品优先于店铺类型，区分商品语义，例如咖啡杯与咖啡；多类商品可概括实际混合内容，不强行归类。purpose.source仅items商品/服务明细、remark转账备注、bill账单说明、merchant商户名称、unknown无法判断。text不超过40字，reason不超过200字；能明确概括时certainty=high，证据不足时uncertain，unknown不能为high。用途与分类、金额、日期分别判断。
@@ -47,6 +47,7 @@ enum OrderVisionClassifier {
         以下为用户设置的业务识别规则；如与后面的固定输出协议冲突，以固定输出协议为准。
         \(businessRules.replacingOccurrences(of: "{{CURRENT_YEAR}}", with: String(year)))
         固定输出协议：
+        金额口径固定为整笔订单的实付总金额，优先整单付款汇总区域中明确显示的最终实际支付总额。单件商品、单晚价格、原价、商品合计、优惠、运费和待支付金额不能替代整单实付。最终实付已含配送、服务或税费时直接采用显示的总额，不能重复加项。不得自行加减、推算优惠或合计多笔扣款；找不到明确唯一的实付总额时amount=null，只提供可能的整单金额候选并说明来源。退款、收入及复杂支付状态仍需单独判断。
         各字段独立判断确定性；用途或金额不确定不能阻止其他字段。certainty仅high/uncertain，每个reason不超过60字，payment.evidence不超过80字，候选label不超过12字。说明只写关键依据，不重复、不逐行转写截图、不输出思考过程。使用紧凑JSON。待分类不能为high。只输出一个JSON对象，无其他文字：
         {"page_type":"payment_detail/order_detail/order_list/refund_detail/other中的一个","category":"交通/餐食/住宿/道具采购/其他/待分类中的一个","certainty":"high或uncertain","reason":"分类依据","purpose":{"text":"简短用途概括","certainty":"high或uncertain","source":"items/remark/bill/merchant/unknown中的一个","reason":"用途依据"},"payment":{"amount":null,"certainty":"uncertain","direction":"expense/refund/income/uncertain中的一个","state":"paid/refund_entry/refund_processing/full_refund/partial_refund/split_payment/unknown中的一个","reason":"金额依据","evidence":"支付标签、位置及排除依据","candidates":[],"candidate_details":[]},"transaction_date":{"date":null,"certainty":"uncertain","reason":"日期依据","candidates":[]}}
         确定金额及金额候选均输出十进制字符串、不带货币单位；确定日期及日期候选均输出日期字符串。
