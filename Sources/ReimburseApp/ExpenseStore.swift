@@ -541,12 +541,20 @@ public struct ExpenseExportIssue: Identifiable {
                 appendAINote("用途：\(purpose.text)（\(source)）；\(purpose.reason)", to: id)
             } else if !result.purposeValidationFailed && (result.purposeSummary != nil || (!result.categoryValidationFailed && (!result.isCertain || result.category == .uncategorized))) {
                 let oldDefault = current.category == .uncategorized ? "" : current.category.rawValue + "费用"
+                let suggestion = result.purposeSummary?.text.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                let hasKnownSource = result.purposeSummary.map { ["items", "remark", "bill", "merchant"].contains($0.source) } ?? false
                 if current.purpose.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || current.purpose == oldDefault {
-                    expenses[index].purpose = ""
+                    expenses[index].purpose = hasKnownSource ? suggestion : ""
                 }
                 confirmedWarnings.remove(id)
-                expenses[index].warning = [expenses[index].warning, "用途待确认（视觉 AI）"].compactMap { $0 }.joined(separator: "；")
-                appendAINote("视觉 AI 未能总结可靠用途，请手动填写：\(result.purposeSummary?.reason ?? result.reason)", to: id)
+                let remaining = (expenses[index].warning ?? "").components(separatedBy: "；")
+                    .filter { !$0.isEmpty && !$0.contains("用途待确认") }
+                expenses[index].warning = (remaining + ["用途待确认（视觉 AI）"]).joined(separator: "；")
+                if !suggestion.isEmpty {
+                    appendAINote("AI 用途建议：\(suggestion)（待核对）；\(result.purposeSummary?.reason ?? result.reason)", to: id)
+                } else {
+                    appendAINote("视觉 AI 未返回可用的用途概括，请手动填写：\(result.purposeSummary?.reason ?? result.reason)", to: id)
+                }
             } else if result.purposeSummary == nil && !result.purposeValidationFailed && !result.categoryValidationFailed && result.isCertain {
                 // Older responses lack an independent purpose; only then retain the category-based fallback.
                 let oldDefault = current.category == .uncategorized ? "" : current.category.rawValue + "费用"
@@ -775,7 +783,13 @@ public struct ExpenseExportIssue: Identifiable {
               !expenses[index].isDuplicate else { return }
         markEdited(id, field: .amount)
         expenses[index].amount = candidate.amount
-        confirmedWarnings.insert(id)
+        if AppIdentity.isVisionTest {
+            let remaining = (expenses[index].warning ?? "").components(separatedBy: "；")
+                .filter { !$0.isEmpty && !Self.amountWarningFragments.contains(where: $0.contains) }
+            expenses[index].warning = remaining.isEmpty ? nil : remaining.joined(separator: "；")
+            // Picking money does not also review an uncertain purpose; explicit row review remains valid.
+            if remaining.isEmpty { confirmedWarnings.insert(id) }
+        } else { confirmedWarnings.insert(id) }
     }
 
     static func parseAmountInput(_ text: String) -> Decimal? {

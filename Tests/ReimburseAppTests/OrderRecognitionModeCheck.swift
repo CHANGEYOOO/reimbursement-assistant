@@ -43,6 +43,61 @@ import Foundation
         precondition(visualCalls == 1 && store.expenses[0].amount == 200 && store.expenses[0].date == "2026-10-22" && store.expenses[0].purpose == "大力胶采购")
         precondition((store.recognizedTexts[aiID] ?? "").isEmpty && !store.pendingIDs.contains(aiID))
 
+        // Initial imports keep a grounded generic AI summary even when the model is cautious.
+        var billSummary = SemanticClassification(category: .uncategorized, isCertain: false, reason: "交易摘要无具体商品", payment: SemanticPayment(amount: Decimal(string: "41.70"), isCertain: true, reason: "消费扣款41.70", candidates: []), transactionDate: SemanticDate(date: "2026-10-23", isCertain: true, reason: "交易日期", candidates: []))
+        billSummary.purposeSummary = SemanticPurpose(text: "某平台消费", isCertain: false, source: "bill", reason: "仅见平台名称及消费摘要，无具体商品明细")
+        let cautiousSummary = billSummary
+        store.reset(); let billID = store.queue(fixture)
+        await store.recognizeExpense(id: billID, url: fixture,
+            recognizeLocally: { _ in preconditionFailure("Purpose cannot fall back to OCR") },
+            recognizeVisually: { id in
+                store.startVisionAI(id, configuration: configuration, recognize: { _, text, _ in
+                    precondition(text.isEmpty); return cautiousSummary
+                })
+            })
+        await waitForAI(store)
+        precondition(store.expenses[0].purpose == "某平台消费", "Automatic import must not erase an available grounded AI purpose summary")
+        precondition(store.expenses[0].category == .uncategorized && store.expenses[0].amount == Decimal(string: "41.70"))
+        precondition(store.exportBlocker != nil && store.expenses[0].warning?.contains("用途待确认") == true, "A cautious AI suggestion is prefilled but still needs review")
+        precondition(store.aiNotes[billID]?.contains("用途建议：某平台消费") == true, "The actual model summary remains visible for diagnosis")
+        store.automaticallyAssistUnresolvedExpenses()
+        precondition(store.aiPendingIDs.isEmpty, "Uncertain purpose must not trigger automatic retries")
+        store.startVisionAI(billID, configuration: configuration, recognize: { _, _, _ in cautiousSummary })
+        await waitForAI(store)
+        precondition(store.expenses[0].purpose == "某平台消费", "Manual retest of the same response has the same purpose behavior")
+        var confident = cautiousSummary
+        confident.purposeSummary = SemanticPurpose(text: "某平台消费", isCertain: true, source: "bill", reason: "账单摘要支持平台消费，不推测商品")
+        let confidentSummary = confident
+        store.startVisionAI(billID, configuration: configuration, recognize: { _, _, _ in confidentSummary })
+        await waitForAI(store)
+        precondition(store.expenses[0].purpose == "某平台消费" && store.expenses[0].category == .uncategorized && store.exportBlocker == nil, "Reliable generic purpose can export without forcing a category")
+
+        var ungrounded = cautiousSummary
+        ungrounded.purposeSummary = SemanticPurpose(text: "商户消费", isCertain: false, source: "unknown", reason: "看不清交易摘要")
+        let ungroundedSummary = ungrounded
+        store.reset(); let unknownID = store.queue(fixture)
+        await store.recognizeExpense(id: unknownID, url: fixture,
+            recognizeLocally: { _ in preconditionFailure("No OCR fallback") },
+            recognizeVisually: { id in store.startVisionAI(id, configuration: configuration, recognize: { _, _, _ in ungroundedSummary }) })
+        await waitForAI(store)
+        precondition(store.expenses[0].purpose.isEmpty && store.exportBlocker != nil, "Unknown source stays unfilled rather than inventing a purpose")
+        precondition(store.aiNotes[unknownID]?.contains("用途建议：商户消费") == true, "Even an ungrounded model summary is visible without treating it as confirmed data")
+
+        var cautiousMoney = SemanticClassification(category: .uncategorized, isCertain: false, reason: "账单分类待定", payment: SemanticPayment(amount: nil, isCertain: false, reason: "两个金额待选", candidates: [Decimal(string: "41.70")!, 45]), transactionDate: cautiousSummary.transactionDate)
+        cautiousMoney.purposeSummary = cautiousSummary.purposeSummary
+        let cautiousFields = cautiousMoney
+        store.reset(); let bothID = store.queue(fixture)
+        await store.recognizeExpense(id: bothID, url: fixture,
+            recognizeLocally: { _ in preconditionFailure("No OCR fallback") },
+            recognizeVisually: { id in store.startVisionAI(id, configuration: configuration, recognize: { _, _, _ in cautiousFields }) })
+        await waitForAI(store)
+        let candidate = store.amountCandidates[bothID]!.first!
+        store.selectAmountCandidate(candidate, for: bothID)
+        precondition(store.expenses[0].purpose == "某平台消费" && store.expenses[0].amount == Decimal(string: "41.70"))
+        precondition(store.expenses[0].warning?.contains("用途待确认") == true && store.exportBlocker != nil, "Choosing money must not silently confirm the cautious purpose draft")
+        store.confirmAll()
+        precondition(store.exportBlocker == nil, "Explicit manual review can confirm the remaining purpose")
+
         store.reset()
         let failedID = store.queue(fixture)
         await store.recognizeExpense(id: failedID, url: fixture,

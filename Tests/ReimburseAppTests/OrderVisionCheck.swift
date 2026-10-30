@@ -123,6 +123,15 @@ import UniformTypeIdentifiers
         precondition(invalidDetail.payment?.amount == Decimal(string: "39.50") && invalidDetail.validationIssues.contains(where: { $0.contains("候选说明") }), "Invalid optional explanation cannot discard a valid amount")
         let merchantPurpose = try OrderVisionClassifier.decodeResponse(decorated(response, purpose: ["text":"便利店消费","certainty":"high","source":"merchant","reason":"无商品明细，按店名概括"]), statusCode: 200, referenceDate: reference)
         precondition(merchantPurpose.purposeSummary?.text == "便利店消费" && merchantPurpose.purposeSummary?.isCertain == true)
+        let platformBill = try edited(decorated(response, purpose: ["text":"某平台消费","certainty":"high","source":"bill","reason":"银行交易摘要明确显示该平台消费，无商品明细"] )) { report in
+            report["category"] = "待分类"; report["certainty"] = "uncertain"
+            report["reason"] = "无法判断具体商品或服务类别"
+        }
+        let genericPurpose = try OrderVisionClassifier.decodeResponse(platformBill, statusCode: 200, referenceDate: reference)
+        precondition(genericPurpose.category == .uncategorized && !genericPurpose.isCertain && genericPurpose.purposeSummary?.text == "某平台消费" && genericPurpose.purposeSummary?.isCertain == true && genericPurpose.purposeSummary?.source == "bill", "A reliable bank-bill purpose is independent of an unknown item category")
+        precondition(genericPurpose.payment?.isCertain == true && genericPurpose.transactionDate?.date == "2026-10-16", "Broad purpose must not weaken amount or date validation")
+        let tentativeBill = try OrderVisionClassifier.decodeResponse(decorated(response, purpose: ["text":"平台消费","certainty":"uncertain","source":"bill","reason":"交易摘要模糊，暂作概括"]), statusCode: 200, referenceDate: reference)
+        precondition(tentativeBill.purposeSummary?.isCertain == false && tentativeBill.purposeSummary?.text == "平台消费", "A tentative purpose must remain uncertain for store review")
         let remarkPurpose = try OrderVisionClassifier.decodeResponse(decorated(response, purpose: ["text":"拍摄场地租赁","certainty":"high","source":"remark","reason":"转账备注明确写明场地租赁"]), statusCode: 200, referenceDate: reference)
         precondition(remarkPurpose.purposeSummary?.source == "remark")
         let unknownPurpose = try OrderVisionClassifier.decodeResponse(decorated(response, purpose: ["text":"商户消费","certainty":"uncertain","source":"unknown","reason":"仅有模糊商户名"]), statusCode: 200, referenceDate: reference)

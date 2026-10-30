@@ -13,7 +13,7 @@ struct OrderVisionPreferences: Codable, Equatable, Sendable {
     }
 
     var purposeStyle: PurposeStyle = .short
-    var classificationNote = ""
+    var classificationNote = "" // Kept only to migrate the previous separate input.
     var allowOrderDate = true
     var supplementYear = true
     var extraInstructions = ""
@@ -21,13 +21,12 @@ struct OrderVisionPreferences: Codable, Equatable, Sendable {
 
     func validated() throws -> Self {
         var value = self
-        value.classificationNote = classificationNote.trimmingCharacters(in: .whitespacesAndNewlines)
-        value.extraInstructions = extraInstructions.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard value.classificationNote.count <= 1000 else {
-            throw OrderVisionPreferenceError.invalid("分类偏好不能超过1000字。")
-        }
-        guard value.extraInstructions.count <= 2000 else {
-            throw OrderVisionPreferenceError.invalid("补充要求不能超过2000字。")
+        let classification = classificationNote.trimmingCharacters(in: .whitespacesAndNewlines)
+        let extra = extraInstructions.trimmingCharacters(in: .whitespacesAndNewlines)
+        value.extraInstructions = ([classification.isEmpty ? nil : "分类补充：" + classification, extra.isEmpty ? nil : extra].compactMap { $0 }).joined(separator: "\n")
+        value.classificationNote = ""
+        guard value.extraInstructions.count <= 4000 else {
+            throw OrderVisionPreferenceError.invalid("补充要求不能超过4000字。")
         }
         return value
     }
@@ -45,8 +44,7 @@ struct OrderVisionPreferences: Codable, Equatable, Sendable {
         var lines = [base, "用户识别偏好（以下选项优先于前面的业务偏好，固定输出协议和上传授权始终有效）：",
                      "用途优先采用模型对实际订单内容的语义总结，分类仅作辅助；不能用分类费用覆盖具体用途，不强制用途贴合分类。商品、服务和转账备注优先于商户名称；信息不足不编造。", purpose,
                      "默认分类：可食用、饮用的商品归餐食；不可食用的实物、器材、用品归道具采购。按实际订单内容判断，不凭店名编造商品。", date, year]
-        if !classificationNote.isEmpty { lines.append("分类补充偏好：" + classificationNote) }
-        if !extraInstructions.isEmpty { lines.append("其他补充要求：" + extraInstructions) }
+        if !extraInstructions.isEmpty { lines.append("补充要求：" + extraInstructions) }
         return lines.joined(separator: "\n")
     }
 }

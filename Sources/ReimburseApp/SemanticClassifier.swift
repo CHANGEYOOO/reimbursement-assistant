@@ -103,22 +103,9 @@ public struct AIRequestConfiguration: Sendable {
             UserDefaults.standard.set(newValue, forKey: prefix + "orderVisionEnabled")
         }
     }
-    static var orderVisionRules: String {
-        guard AppIdentity.isVisionTest else { return OrderVisionClassifier.defaultRules }
-        return UserDefaults.standard.string(forKey: prefix + "orderVisionRules") ?? OrderVisionClassifier.defaultRules
-    }
-    static func saveOrderVisionRules(_ text: String) throws {
-        let rules = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard AppIdentity.isVisionTest, !rules.isEmpty, rules.count <= 12_000 else {
-            throw OrderVisionError.unavailable("识别规则不能为空，且不能超过12000字。")
-        }
-        if orderVisionRules != rules { revision += 1 }
-        UserDefaults.standard.set(rules, forKey: prefix + "orderVisionRules")
-    }
-    static func resetOrderVisionRules() {
-        guard AppIdentity.isVisionTest else { return }
-        if orderVisionRules != OrderVisionClassifier.defaultRules { revision += 1 }
-        UserDefaults.standard.removeObject(forKey: prefix + "orderVisionRules")
+    static var archivedOrderVisionRules: String? {
+        guard AppIdentity.isVisionTest else { return nil }
+        return UserDefaults.standard.string(forKey: prefix + "orderVisionRules")
     }
     static var orderVisionPreferences: OrderVisionPreferences {
         guard AppIdentity.isVisionTest,
@@ -129,24 +116,21 @@ public struct AIRequestConfiguration: Sendable {
     }
     static var effectiveOrderVisionRules: String {
         guard AppIdentity.isVisionTest else { return OrderVisionClassifier.defaultRules }
-        return orderVisionPreferences.composedRules(base: orderVisionRules)
+        return orderVisionPreferences.composedRules(base: OrderVisionClassifier.defaultRules)
     }
-    static func saveOrderVisionSettings(preferences: OrderVisionPreferences, advancedRules: String) throws {
+    static func saveOrderVisionSettings(preferences: OrderVisionPreferences) throws {
         let preferences = try preferences.validated()
-        let rules = advancedRules.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard AppIdentity.isVisionTest, !rules.isEmpty, rules.count <= 12_000,
-              preferences.composedRules(base: rules).count <= 16_000 else {
-            throw OrderVisionError.unavailable("高级规则不能为空，且不能超过12000字；全部规则合计不能超过16000字。")
+        guard AppIdentity.isVisionTest,
+              preferences.composedRules(base: OrderVisionClassifier.defaultRules).count <= 16_000 else {
+            throw OrderVisionPreferenceError.invalid("识别要求过长，请缩短补充要求。")
         }
         let data = try JSONEncoder().encode(preferences)
-        if orderVisionRules != rules || orderVisionPreferences != preferences { revision += 1 }
-        UserDefaults.standard.set(rules, forKey: prefix + "orderVisionRules")
+        if orderVisionPreferences != preferences { revision += 1 }
         UserDefaults.standard.set(data, forKey: prefix + "orderVisionPreferences")
     }
     static func resetOrderVisionSettings() {
         guard AppIdentity.isVisionTest else { return }
-        if orderVisionRules != OrderVisionClassifier.defaultRules || orderVisionPreferences != .defaults { revision += 1 }
-        UserDefaults.standard.removeObject(forKey: prefix + "orderVisionRules")
+        if orderVisionPreferences != .defaults { revision += 1 }
         UserDefaults.standard.removeObject(forKey: prefix + "orderVisionPreferences")
     }
     public static var provider: AIProvider {

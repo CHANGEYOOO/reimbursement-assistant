@@ -132,39 +132,49 @@ import Foundation
         await wait(store)
         precondition(store.expenses[0].purpose == "我填写的用途", "Higher AI purpose priority never overrides a manual edit")
 
-        let oldRules = AIConfiguration.orderVisionRules
-        let revision = AIConfiguration.revision
-        try AIConfiguration.saveOrderVisionRules("测试用途规则")
-        precondition(AIConfiguration.orderVisionRules == "测试用途规则" && AIConfiguration.revision > revision)
-        do { try AIConfiguration.saveOrderVisionRules("  "); preconditionFailure("Empty rules accepted") } catch {}
-        AIConfiguration.resetOrderVisionRules()
-        precondition(AIConfiguration.orderVisionRules == OrderVisionClassifier.defaultRules)
-        if oldRules != OrderVisionClassifier.defaultRules { try AIConfiguration.saveOrderVisionRules(oldRules) }
-        let originalPreferences = AIConfiguration.orderVisionPreferences
-        defer { try? AIConfiguration.saveOrderVisionSettings(preferences: originalPreferences, advancedRules: oldRules) }
-        var preferences = OrderVisionPreferences.defaults
-        preferences.extraInstructions = "用途保留转账备注"
-        try AIConfiguration.saveOrderVisionSettings(preferences: preferences, advancedRules: "原有高级规则")
-        precondition(AIConfiguration.orderVisionRules == "原有高级规则", "Legacy advanced text retained")
-        precondition(AIConfiguration.orderVisionPreferences == preferences && AIConfiguration.effectiveOrderVisionRules.contains("用途保留转账备注"))
+        let defaults = UserDefaults.standard
+        let archiveKey = "reimbursement.ai.orderVisionRules"
+        let preferencesKey = "reimbursement.ai.orderVisionPreferences"
+        let originalArchive = defaults.string(forKey: archiveKey)
+        let originalPreferenceData = defaults.data(forKey: preferencesKey)
+        defer {
+            if let originalArchive { defaults.set(originalArchive, forKey: archiveKey) }
+            else { defaults.removeObject(forKey: archiveKey) }
+            if let originalPreferenceData { defaults.set(originalPreferenceData, forKey: preferencesKey) }
+            else { defaults.removeObject(forKey: preferencesKey) }
+        }
+        defaults.set("旧整段规则：不得参与当前识别", forKey: archiveKey)
+        var legacyPreferences = OrderVisionPreferences.defaults
+        legacyPreferences.classificationNote = "设备租赁归其他"
+        legacyPreferences.extraInstructions = "用途保留转账备注"
+        defaults.set(try JSONEncoder().encode(legacyPreferences), forKey: preferencesKey)
+        var preferences = AIConfiguration.orderVisionPreferences
+        precondition(preferences.classificationNote.isEmpty && preferences.extraInstructions == "分类补充：设备租赁归其他\n用途保留转账备注")
+        precondition(AIConfiguration.archivedOrderVisionRules == "旧整段规则：不得参与当前识别")
+        precondition(AIConfiguration.effectiveOrderVisionRules.hasPrefix(OrderVisionClassifier.defaultRules) && !AIConfiguration.effectiveOrderVisionRules.contains("不得参与当前识别"), "Archived whole rules are never sent to the model")
+        let migratedRules = AIConfiguration.effectiveOrderVisionRules
         let stableRevision = AIConfiguration.revision
-        try AIConfiguration.saveOrderVisionSettings(preferences: preferences, advancedRules: "原有高级规则")
-        precondition(AIConfiguration.revision == stableRevision, "Saving unchanged settings does not invalidate requests")
-        var badPreferences = preferences; badPreferences.extraInstructions = String(repeating: "x", count: 2001)
-        do { try AIConfiguration.saveOrderVisionSettings(preferences: badPreferences, advancedRules: "不应保存"); preconditionFailure("Invalid settings accepted") } catch {}
-        precondition(AIConfiguration.orderVisionRules == "原有高级规则" && AIConfiguration.orderVisionPreferences == preferences && AIConfiguration.revision == stableRevision, "Validation happens before all writes")
+        try AIConfiguration.saveOrderVisionSettings(preferences: preferences)
+        precondition(AIConfiguration.revision == stableRevision && AIConfiguration.effectiveOrderVisionRules == migratedRules, "Saving migration without changing effective rules does not invalidate requests")
+        let savedPreferences = try JSONDecoder().decode(OrderVisionPreferences.self, from: defaults.data(forKey: preferencesKey)!)
+        precondition(savedPreferences.classificationNote.isEmpty && savedPreferences.extraInstructions == preferences.extraInstructions, "Migration is persisted once")
+        precondition(AIConfiguration.archivedOrderVisionRules == "旧整段规则：不得参与当前识别", "Saving current preferences preserves the old archive")
+        var badPreferences = preferences; badPreferences.extraInstructions = String(repeating: "x", count: 4001)
+        do { try AIConfiguration.saveOrderVisionSettings(preferences: badPreferences); preconditionFailure("Invalid settings accepted") } catch {}
+        precondition(AIConfiguration.orderVisionPreferences == preferences && AIConfiguration.revision == stableRevision && AIConfiguration.archivedOrderVisionRules == "旧整段规则：不得参与当前识别", "Validation occurs before any settings mutation")
         store.reset(); let rulesRow = row(); store.expenses = [rulesRow]
         store.startVisionAI(rulesRow.id, configuration: config, recognize: { _, _, _ in
             try await Task.sleep(nanoseconds: 20_000_000); return merchant
         })
         preferences.purposeStyle = .merchant
-        try AIConfiguration.saveOrderVisionSettings(preferences: preferences, advancedRules: "原有高级规则")
+        try AIConfiguration.saveOrderVisionSettings(preferences: preferences)
         await wait(store)
-        precondition(store.expenses[0].purpose == rulesRow.purpose && store.aiNotes[rulesRow.id]?.contains("已改变") == true, "Changed rules discard in-flight old results")
+        precondition(store.expenses[0].purpose == rulesRow.purpose && store.aiNotes[rulesRow.id]?.contains("已改变") == true, "Changed preferences discard in-flight old results")
         store.automaticallyAssistUnresolvedExpenses()
         precondition(store.aiPendingIDs.isEmpty, "Changed preferences don't repeat attempted rows")
         AIConfiguration.resetOrderVisionSettings()
-        precondition(AIConfiguration.orderVisionRules == OrderVisionClassifier.defaultRules && AIConfiguration.orderVisionPreferences == .defaults, "Reset restores both preferences and advanced rules")
+        precondition(AIConfiguration.orderVisionPreferences == .defaults && AIConfiguration.effectiveOrderVisionRules.hasPrefix(OrderVisionClassifier.defaultRules), "Reset restores active defaults")
+        precondition(AIConfiguration.archivedOrderVisionRules == "旧整段规则：不得参与当前识别", "Reset never deletes the legacy archive")
         print("Vision store: all new rows, empty OCR, comparison, manual protection, candidates, refunds, failure, repeat and consent checks passed (offline)")
     }
 }
