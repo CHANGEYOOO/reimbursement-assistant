@@ -16,13 +16,32 @@ import UniformTypeIdentifiers
         let body = try JSONSerialization.jsonObject(with: request.httpBody!) as! [String: Any]
         precondition(body["model"] as? String == "vision-test")
         precondition(body["max_tokens"] as? Int == 4096, "Visual output budget must fit the complete JSON")
-        precondition(body["thinking"] == nil && body["enable_thinking"] == nil, "Generic compatible endpoints must not get provider-specific parameters")
+        precondition(body["thinking"] == nil && body["enable_thinking"] == nil && body["response_format"] == nil, "Generic compatible endpoints must not get unverified model parameters")
         for model in ["deepseek-flash", "deepseek-v4-flash", "deepseek-v4-flash-vision-exp"] {
             let deepSeek = try AIRequestConfiguration(endpoint: URL(string: "https://api.deepseek.com/chat/completions")!, model: model, apiKey: "offline-not-sent")
             let deepSeekRequest = try OrderVisionClassifier.makeRequest(imageURL: source, text: "", configuration: deepSeek)
             let deepSeekBody = try JSONSerialization.jsonObject(with: deepSeekRequest.httpBody!) as! [String: Any]
             precondition((deepSeekBody["thinking"] as? [String: String])?["type"] == "disabled")
             precondition(deepSeekBody["enable_thinking"] == nil, "DeepSeek must not receive Qwen's parameter")
+            precondition((deepSeekBody["response_format"] as? [String: String])?["type"] == "json_object")
+        }
+        for host in ["maas.qianwenaiapi.com", "dashscope.aliyuncs.com", "dashscope-intl.aliyuncs.com", "dashscope-us.aliyuncs.com"] {
+            for model in ["qwen3-vl-plus", "qwen3-vl-plus-2025-12-19", "qwen3.5-plus", "qwen3.7-plus", "qwen3.8-max"] {
+                let qwen = try AIRequestConfiguration(endpoint: URL(string: "https://\(host)/compatible-mode/v1/chat/completions")!, model: model, apiKey: "offline-not-sent")
+                let qwenRequest = try OrderVisionClassifier.makeRequest(imageURL: source, text: "", configuration: qwen)
+                let qwenBody = try JSONSerialization.jsonObject(with: qwenRequest.httpBody!) as! [String: Any]
+                precondition((qwenBody["response_format"] as? [String: String])?["type"] == "json_object")
+                precondition(qwenBody["thinking"] == nil && qwenBody["max_tokens"] as? Int == 4096)
+                if model.hasPrefix("qwen3.7") || model.hasPrefix("qwen3.8") {
+                    precondition(qwenBody["enable_thinking"] == nil, "Models supporting JSON with thinking keep documented defaults")
+                } else { precondition(qwenBody["enable_thinking"] as? Bool == false) }
+            }
+        }
+        for (host, model) in [("example.invalid", "qwen3-vl-plus"), ("maas.qianwenaiapi.com", "qwen3-vl-plus-thinking"), ("maas.qianwenaiapi.com", "custom-model")] {
+            let unknown = try AIRequestConfiguration(endpoint: URL(string: "https://\(host)/chat/completions")!, model: model, apiKey: "offline-not-sent")
+            let unknownRequest = try OrderVisionClassifier.makeRequest(imageURL: source, text: "", configuration: unknown)
+            let unknownBody = try JSONSerialization.jsonObject(with: unknownRequest.httpBody!) as! [String: Any]
+            precondition(unknownBody["response_format"] == nil && unknownBody["thinking"] == nil && unknownBody["enable_thinking"] == nil)
         }
         let otherDeepSeekModel = try AIRequestConfiguration(endpoint: URL(string: "https://api.deepseek.com/chat/completions")!, model: "custom-model", apiKey: "offline-not-sent")
         let otherRequest = try OrderVisionClassifier.makeRequest(imageURL: source, text: "", configuration: otherDeepSeekModel)
@@ -56,6 +75,30 @@ import UniformTypeIdentifiers
         precondition(result.category == .meals && result.isCertain)
         precondition(result.payment?.amount == Decimal(string: "39.50") && result.payment?.isCertain == true, "Visual amount need not occur in OCR")
         precondition(result.transactionDate?.date == "2026-10-16")
+        func contentResponse(_ content: Any) throws -> Data {
+            var envelope = try JSONSerialization.jsonObject(with: response) as! [String: Any]
+            var choices = envelope["choices"] as! [[String: Any]]
+            choices[0]["message"] = ["content": content]
+            envelope["choices"] = choices
+            return try JSONSerialization.data(withJSONObject: envelope)
+        }
+        let responseEnvelope = try JSONSerialization.jsonObject(with: response) as! [String: Any]
+        let responseMessage = ((responseEnvelope["choices"] as! [[String: Any]])[0]["message"] as! [String: Any])
+        let rawJSON = responseMessage["content"] as! String
+        for wrapped in ["识别结果如下：\n```JSON\n" + rawJSON + "\n```\n以上为本单结果。", "\u{FEFF}  " + rawJSON] {
+            let tolerant = try OrderVisionClassifier.decodeResponse(contentResponse(wrapped), statusCode: 200, referenceDate: reference)
+            precondition(tolerant.payment?.amount == Decimal(string: "39.50") && tolerant.transactionDate?.date == "2026-10-16")
+        }
+        let blocks = try OrderVisionClassifier.decodeResponse(contentResponse([["type": "text", "text": rawJSON]]), statusCode: 200, referenceDate: reference)
+        precondition(blocks.payment?.amount == Decimal(string: "39.50"), "Compatible text content blocks retain the same fields")
+        try rejects { _ = try OrderVisionClassifier.decodeResponse(contentResponse(rawJSON + "\n" + rawJSON), statusCode: 200) }
+        let malformedOnce = MockSender(response: try contentResponse("{\"payment\": {"))
+        do {
+            _ = try await OrderVisionClassifier.classify(imageURL: source, text: "", configuration: configuration, sender: malformedOnce.send)
+            preconditionFailure("Broken JSON must be rejected")
+        } catch {}
+        let malformedAttempts = await malformedOnce.count
+        precondition(malformedAttempts == 1, "JSON format errors must not trigger an API repair or retry")
         let negative = try OrderVisionClassifier.decodeResponse(answer(amount: "-39.50"), statusCode: 200, referenceDate: reference)
         precondition(negative.payment?.amount == Decimal(string: "39.50"))
         let refund = try OrderVisionClassifier.decodeResponse(answer(direction: "refund"), statusCode: 200, referenceDate: reference)

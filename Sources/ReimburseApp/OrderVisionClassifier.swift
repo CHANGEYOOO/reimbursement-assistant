@@ -65,10 +65,22 @@ enum OrderVisionClassifier {
             "model": configuration.model, "stream": false, "max_tokens": 4096,
             "messages": [["role": "system", "content": instruction], ["role": "user", "content": content]]
         ]
-        // Only documented official Flash models get DeepSeek's nonstandard thinking parameter.
-        if configuration.endpoint.host?.lowercased() == "api.deepseek.com",
-           ["deepseek-flash", "deepseek-v4-flash", "deepseek-v4-flash-vision-exp"].contains(configuration.model) {
+        let host = configuration.endpoint.host?.lowercased() ?? ""
+        let model = configuration.model
+        func matches(_ families: [String]) -> Bool {
+            !model.contains("-thinking") && families.contains { model == $0 || model.hasPrefix($0 + "-") }
+        }
+        // Provider parameters are limited to documented models on their official endpoints.
+        if host == "api.deepseek.com", ["deepseek-flash", "deepseek-v4-flash", "deepseek-v4-flash-vision-exp"].contains(model) {
             body["thinking"] = ["type": "disabled"]
+            body["response_format"] = ["type": "json_object"]
+        } else if ["maas.qianwenaiapi.com", "dashscope.aliyuncs.com", "dashscope-intl.aliyuncs.com", "dashscope-us.aliyuncs.com"].contains(host) {
+            let switchable = ["qwen3-vl-plus", "qwen3.5-plus", "qwen3.5-flash", "qwen3.6-plus", "qwen3.6-flash"]
+            let thinkingJSON = ["qwen3.7-plus", "qwen3.7-max", "qwen3.7-flash", "qwen3.8-max", "qwen3.8-flash"]
+            if matches(switchable + thinkingJSON) {
+                body["response_format"] = ["type": "json_object"]
+                if matches(switchable) { body["enable_thinking"] = false }
+            }
         }
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         return request
@@ -121,7 +133,22 @@ enum OrderVisionClassifier {
     static func decodeResponse(_ data: Data, statusCode: Int, referenceDate: Date = Date(), allowYearSupplement: Bool = true) throws -> SemanticClassification {
         guard (200..<300).contains(statusCode) else { throw SemanticError.http(statusCode) }
         guard data.count <= 1_000_000 else { throw OrderVisionError.unavailable("视觉模型返回内容过长，未应用。") }
-        struct Message: Decodable { let content: String }
+        struct Message: Decodable {
+            let content: String
+            private enum CodingKeys: String, CodingKey { case content }
+            private struct TextPart: Decodable { let type: String?; let text: String }
+            init(from decoder: Decoder) throws {
+                let values = try decoder.container(keyedBy: CodingKeys.self)
+                if let text = try? values.decode(String.self, forKey: .content) { content = text }
+                else {
+                    let parts = try values.decode([TextPart].self, forKey: .content)
+                    guard !parts.isEmpty, parts.allSatisfy({ $0.type == nil || ["text", "output_text"].contains($0.type!) }) else {
+                        throw OrderVisionError.unavailable("视觉模型未返回可读取的文本结果，未应用；不会自动重试。")
+                    }
+                    content = parts.map(\.text).joined(separator: "\n")
+                }
+            }
+        }
         struct Choice: Decodable { let message: Message; let finish_reason: String? }
         struct Envelope: Decodable { let choices: [Choice] }
         let envelope: Envelope
@@ -133,20 +160,7 @@ enum OrderVisionClassifier {
         guard choice.finish_reason == nil || choice.finish_reason == "stop" else {
             throw OrderVisionError.unavailable(choice.finish_reason == "length" ? "视觉模型输出达到长度上限，结果未应用，不会自动重试。" : "视觉模型未正常完成输出，未应用。")
         }
-        var content = choice.message.content.trimmingCharacters(in: .whitespacesAndNewlines)
-        if content.hasPrefix("```"), content.hasSuffix("```"), let newline = content.firstIndex(of: "\n") {
-            let header = String(content[..<newline])
-            guard header == "```" || header == "```json" else { throw OrderVisionError.unavailable("视觉模型返回的内容不是 JSON 格式，未应用。") }
-            content = String(content[content.index(after: newline)...].dropLast(3)).trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-        guard content.count <= 12_000 else { throw OrderVisionError.unavailable("视觉模型返回内容过长，未应用。") }
-        let report: [String: Any]
-        do {
-            guard let object = try JSONSerialization.jsonObject(with: Data(content.utf8)) as? [String: Any] else {
-                throw OrderVisionError.invalidResponse
-            }
-            report = object
-        } catch { throw OrderVisionError.unavailable("视觉模型返回的 JSON 不完整或格式错误，未应用。") }
+        let report = try OrderVisionJSON.object(from: choice.message.content)
 
         var issues: [String] = []
         func read<T: Decodable>(_ key: String, as type: T.Type, title: String) -> T? {
