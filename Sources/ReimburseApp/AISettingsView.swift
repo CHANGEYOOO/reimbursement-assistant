@@ -18,6 +18,10 @@ struct AISettingsView: View {
                         .font(.callout).foregroundStyle(.orange)
                     Text("项目、密钥和设置与正式版独立，需重新填写配置。同一记录只自动尝试一次；保存项目后重开不会自动重复上传。更换模型后可点“重测选中订单”，会再次产生请求。手动修改或重开后已保存的字段会保留，重测结果在行内显示供对比。测试连接仅验证文字。")
                         .font(.caption).foregroundStyle(.secondary)
+                    Text("用途会根据商品、转账备注、账单说明或商户名称概括；只有店名时也可填写“某便利店消费”，分类仍可留待分类。")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Button("AI 识别规则…") { state.showingRules = true }
+                        .disabled(state.testing)
                 }
 
                 if !AppIdentity.isVisionTest { Text("保存并启用后，订单中本地未识别的用途、金额或日期会自动交给 AI，当前待处理记录也会接续处理。仅发送识别文字；月日可按当前年份补全。明确结果直接填写并可导出；日期可自动采用有原文依据的参考日期，金额和用途仍不确定时才需要处理。")
@@ -68,6 +72,9 @@ struct AISettingsView: View {
         }
         .frame(width: 620, height: 510)
         .onChange(of: state.provider) { _, _ in state.load() }
+        .sheet(isPresented: $state.showingRules) {
+            OrderVisionRulesView(saved: saved)
+        }
     }
 }
 
@@ -82,6 +89,7 @@ struct AISettingsView: View {
     @Published var message = ""
     @Published var testing = false
     @Published var clearingInvoiceCache = false
+    @Published var showingRules = false
 
     init() { load() }
 

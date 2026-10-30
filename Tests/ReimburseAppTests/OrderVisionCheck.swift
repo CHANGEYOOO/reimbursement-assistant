@@ -18,6 +18,16 @@ import UniformTypeIdentifiers
         precondition(request.value(forHTTPHeaderField: "Authorization") == "Bearer offline-secret")
         precondition(!String(data: request.httpBody!, encoding: .utf8)!.contains("offline-secret"))
         let messages = body["messages"] as! [[String: Any]]
+        let defaultInstruction = messages[0]["content"] as! String
+        precondition(defaultInstruction.contains("公历年2026") && !defaultInstruction.contains("{{CURRENT_YEAR}}"))
+        precondition(OrderVisionClassifier.defaultRules.contains("{{CURRENT_YEAR}}"))
+        let customRequest = try OrderVisionClassifier.makeRequest(imageURL: source, text: "", configuration: configuration, referenceDate: reference, rules: "用户业务规则：年份{{CURRENT_YEAR}}，用途保留商户名")
+        let customBody = try JSONSerialization.jsonObject(with: customRequest.httpBody!) as! [String: Any]
+        let customInstruction = ((customBody["messages"] as! [[String: Any]])[0]["content"] as! String)
+        precondition(customInstruction.contains("用户业务规则：年份2026") && customInstruction.contains("固定输出协议") && customInstruction.contains("candidate_details") && customInstruction.contains("不可信数据"), "Custom business rules cannot remove the fixed response and untrusted-input protocol")
+        precondition(!customInstruction.contains("金额先找实付"), "Custom rules replace the default business portion")
+        try rejects { _ = try OrderVisionClassifier.makeRequest(imageURL: source, text: "", configuration: configuration, rules: "  \n ") }
+        try rejects { _ = try OrderVisionClassifier.makeRequest(imageURL: source, text: "", configuration: configuration, rules: String(repeating: "长", count: 12_001)) }
         let content = messages[1]["content"] as! [[String: Any]]
         let images = content.filter { $0["type"] as? String == "image_url" }
         precondition(images.count == 1, "Empty OCR must still send a readable image")
@@ -37,6 +47,30 @@ import UniformTypeIdentifiers
         precondition(refund.payment?.amount == nil && refund.payment?.candidates.isEmpty == true && refund.payment?.isNonExpense == true)
         let ambiguous = try OrderVisionClassifier.decodeResponse(answer(amount: nil, paymentCertainty: "uncertain", candidates: ["39.50", "45.00"]), statusCode: 200, referenceDate: reference)
         precondition(ambiguous.payment?.amount == nil && ambiguous.payment?.candidates == [Decimal(string: "39.50")!, 45])
+        let list = try OrderVisionClassifier.decodeResponse(decorated(response, page: "order_list", state: "paid"), statusCode: 200, referenceDate: reference)
+        precondition(list.payment?.amount == nil && list.payment?.isCertain == false && list.payment?.candidates == [Decimal(string: "39.50")!], "Order list is never silently one confirmed expense")
+        for state in ["partial_refund", "split_payment", "refund_processing", "unknown", "future_state"] {
+            let complex = try OrderVisionClassifier.decodeResponse(decorated(response, page: "order_detail", state: state), statusCode: 200, referenceDate: reference)
+            precondition(complex.payment?.amount == nil && complex.payment?.isCertain == false, "Complex/unknown payment states require choice: " + state)
+        }
+        let refundEntry = try OrderVisionClassifier.decodeResponse(decorated(response, page: "order_detail", state: "refund_entry", evidence: "页面下方退款按钮；上方实际支付39.50"), statusCode: 200, referenceDate: reference)
+        precondition(refundEntry.payment?.amount == Decimal(string: "39.50") && refundEntry.payment?.isCertain == true, "Refund action button does not mean money refunded")
+        let fullRefund = try OrderVisionClassifier.decodeResponse(decorated(response, page: "refund_detail", state: "full_refund"), statusCode: 200, referenceDate: reference)
+        precondition(fullRefund.payment?.isNonExpense == true && fullRefund.payment?.amount == nil && fullRefund.payment?.candidates.isEmpty == true, "Full refund cannot retain a paid amount")
+        let otherPage = try OrderVisionClassifier.decodeResponse(decorated(response, page: "unrecognized_page", state: "paid"), statusCode: 200, referenceDate: reference)
+        precondition(otherPage.payment?.amount == nil && otherPage.category == .meals && otherPage.transactionDate?.date != nil, "Unknown page holds money without losing unrelated fields")
+        let explained = try OrderVisionClassifier.decodeResponse(decorated(answer(amount: nil, paymentCertainty: "uncertain", candidates: ["39.50", "45.00"]), page: "payment_detail", state: "paid", evidence: "支付标签对应39.50，45.00是订单合计", details: [["amount":"39.50","label":"实付候选"],["amount":"45.00","label":"订单合计"]]), statusCode: 200, referenceDate: reference)
+        precondition(explained.payment?.candidateSources[Decimal(string: "39.50")!] == "实付候选" && explained.visionSummary?.contains("支付详情") == true && explained.visionSummary?.contains("支付标签") == true)
+        try rejects { _ = try OrderVisionClassifier.decodeResponse(decorated(response, page: "payment_detail", state: "paid", details: [["amount":"999.00","label":"不属于候选"]]), statusCode: 200, referenceDate: reference) }
+        let merchantPurpose = try OrderVisionClassifier.decodeResponse(decorated(response, purpose: ["text":"便利店消费","certainty":"high","source":"merchant","reason":"无商品明细，按店名概括"]), statusCode: 200, referenceDate: reference)
+        precondition(merchantPurpose.purposeSummary?.text == "便利店消费" && merchantPurpose.purposeSummary?.isCertain == true)
+        let remarkPurpose = try OrderVisionClassifier.decodeResponse(decorated(response, purpose: ["text":"拍摄场地租赁","certainty":"high","source":"remark","reason":"转账备注明确写明场地租赁"]), statusCode: 200, referenceDate: reference)
+        precondition(remarkPurpose.purposeSummary?.source == "remark")
+        let unknownPurpose = try OrderVisionClassifier.decodeResponse(decorated(response, purpose: ["text":"商户消费","certainty":"uncertain","source":"unknown","reason":"仅有模糊商户名"]), statusCode: 200, referenceDate: reference)
+        precondition(unknownPurpose.purposeSummary?.isCertain == false && result.purposeSummary == nil, "Unknown purpose not auto-filled; old payload remains compatible")
+        try rejects { _ = try OrderVisionClassifier.decodeResponse(decorated(response, purpose: ["text":"","certainty":"high","source":"merchant","reason":"没有内容"]), statusCode: 200, referenceDate: reference) }
+        try rejects { _ = try OrderVisionClassifier.decodeResponse(decorated(response, purpose: ["text":"猜测用途","certainty":"high","source":"unknown","reason":"无法判断"]), statusCode: 200, referenceDate: reference) }
+        try rejects { _ = try OrderVisionClassifier.decodeResponse(decorated(response, purpose: ["text":String(repeating:"长",count:41),"certainty":"high","source":"items","reason":"过长"]), statusCode: 200, referenceDate: reference) }
         let monthDay = try OrderVisionClassifier.decodeResponse(answer(date: "10-16"), statusCode: 200, referenceDate: reference)
         precondition(monthDay.transactionDate?.date == "2026-10-16" && monthDay.transactionDate?.reason.contains("2026") == true)
         let approximate = try OrderVisionClassifier.decodeResponse(answer(date: nil, dateCertainty: "uncertain", dates: ["10-16"]), statusCode: 200, referenceDate: reference)
@@ -101,6 +135,23 @@ import UniformTypeIdentifiers
         let object: [String: Any] = ["category": category, "certainty": "high", "reason": "商品为食物", "payment": ["amount": amount as Any? ?? NSNull(), "certainty": paymentCertainty, "direction": direction, "reason": "页面实付金额", "candidates": candidates], "transaction_date": ["date": date as Any? ?? NSNull(), "certainty": dateCertainty, "reason": "页面支付日期", "candidates": dates]]
         let content = String(data: try JSONSerialization.data(withJSONObject: object), encoding: .utf8)!
         return try JSONSerialization.data(withJSONObject: ["choices": Array(repeating: ["message": ["content": content], "finish_reason": finish] as [String: Any], count: choiceCount)])
+    }
+    static func decorated(_ data: Data, page: String? = nil, state: String? = nil, evidence: String? = nil,
+                          details: [[String:String]]? = nil, purpose: [String:String]? = nil) throws -> Data {
+        var envelope = try JSONSerialization.jsonObject(with: data) as! [String:Any]
+        var choices = envelope["choices"] as! [[String:Any]]
+        var message = choices[0]["message"] as! [String:Any]
+        var report = try JSONSerialization.jsonObject(with: Data((message["content"] as! String).utf8)) as! [String:Any]
+        var payment = report["payment"] as! [String:Any]
+        if let page { report["page_type"] = page }
+        if let state { payment["state"] = state }
+        if let evidence { payment["evidence"] = evidence }
+        if let details { payment["candidate_details"] = details }
+        if let purpose { report["purpose"] = purpose }
+        report["payment"] = payment
+        message["content"] = String(data: try JSONSerialization.data(withJSONObject: report), encoding: .utf8)!
+        choices[0]["message"] = message; envelope["choices"] = choices
+        return try JSONSerialization.data(withJSONObject: envelope)
     }
     static func rejects(_ work: () throws -> Void) throws { do { try work() } catch { return }; preconditionFailure("Expected invalid input to be rejected") }
     actor UploadAuthorization {

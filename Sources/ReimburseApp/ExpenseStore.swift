@@ -402,7 +402,14 @@ public struct ExpenseExportIssue: Identifiable {
     }
 
     func markEdited(_ id: UUID, field: Field) {
-        if let index = expenses.firstIndex(where: { $0.id == id }) { expenses[index].aiRecognized = nil }
+        if let index = expenses.firstIndex(where: { $0.id == id }) {
+            expenses[index].aiRecognized = nil
+            if AppIdentity.isVisionTest && field == .purpose {
+                let remaining = (expenses[index].warning ?? "").components(separatedBy: "；")
+                    .filter { !$0.isEmpty && !$0.contains("用途待确认") && !$0.contains("用途分类待确认") }
+                expenses[index].warning = remaining.isEmpty ? nil : remaining.joined(separator: "；")
+            }
+        }
         if field == .category || field == .purpose { categoryRevisions[id, default: 0] += 1 }
         if field == .amount {
             amountRevisions[id, default: 0] += 1
@@ -468,6 +475,7 @@ public struct ExpenseExportIssue: Identifiable {
               let original = expenses.first(where: { $0.id == id }) else { return }
         let token = UUID()
         let configurationRevision = AIConfiguration.revision
+        let visionRules = AIConfiguration.orderVisionRules
         let revisions = (category: categoryRevisions[id, default: 0], amount: amountRevisions[id, default: 0], date: dateRevisions[id, default: 0])
         let before = "识别前：金额 \(original.amount.map { "¥\($0)" } ?? "未填写") / 日期 \(original.date.isEmpty ? "未填写" : original.date) / \(original.category.rawValue)"
         let text = recognizedTexts[id] ?? ""
@@ -480,7 +488,7 @@ public struct ExpenseExportIssue: Identifiable {
                 let result: SemanticClassification
                 if let recognize { result = try await recognize(original.sourceURL, text, configuration) }
                 else {
-                    result = try await OrderVisionClassifier.classify(imageURL: original.sourceURL, text: text, configuration: configuration,
+                    result = try await OrderVisionClassifier.classify(imageURL: original.sourceURL, text: text, configuration: configuration, rules: visionRules,
                         authorized: { @Sendable [self] in
                             await MainActor.run {
                                 return self.aiTokens[id] == token && AIConfiguration.enabled && AIConfiguration.orderVisionEnabled && AIConfiguration.revision == configurationRevision
@@ -510,9 +518,30 @@ public struct ExpenseExportIssue: Identifiable {
         let amount = result.payment?.amount.map { "¥\($0)" } ?? "未确定"
         let date = result.transactionDate?.date ?? result.transactionDate?.candidates.first ?? "未确定"
         aiNotes[id] = before + "\n视觉结果：\(amount) / \(date) / \(result.category.rawValue)"
+        if let summary = result.visionSummary { appendAINote(summary, to: id) }
         if plan.category, categoryRevisions[id, default: 0] == revisions.category,
-           current.category == original.category, current.purpose == original.purpose {
-            applySemanticClassification(result, to: id)
+           current.category == original.category, current.purpose == original.purpose,
+           let index = expenses.firstIndex(where: { $0.id == id }) {
+            if result.isCertain && result.category != .uncategorized {
+                applySemanticClassification(result, to: id)
+            } else {
+                expenses[index].category = .uncategorized
+            }
+            if let purpose = result.purposeSummary, purpose.isCertain,
+               !purpose.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                expenses[index].purpose = purpose.text
+                acceptAIResult(at: index, removing: ["用途分类待确认", "用途待确认"])
+                let source = ["items": "商品明细", "remark": "转账备注", "bill": "账单说明", "merchant": "商户信息"][purpose.source] ?? "截图信息"
+                appendAINote("用途：\(purpose.text)（\(source)）；\(purpose.reason)", to: id)
+            } else if result.purposeSummary != nil || !result.isCertain || result.category == .uncategorized {
+                let oldDefault = current.category == .uncategorized ? "" : current.category.rawValue + "费用"
+                if current.purpose.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || current.purpose == oldDefault {
+                    expenses[index].purpose = ""
+                }
+                confirmedWarnings.remove(id)
+                expenses[index].warning = [expenses[index].warning, "用途待确认（视觉 AI）"].compactMap { $0 }.joined(separator: "；")
+                appendAINote("视觉 AI 未能总结可靠用途，请手动填写：\(result.purposeSummary?.reason ?? result.reason)", to: id)
+            }
         }
         if plan.amount, amountRevisions[id, default: 0] == revisions.amount, current.amount == original.amount,
            let payment = result.payment {
@@ -526,11 +555,12 @@ public struct ExpenseExportIssue: Identifiable {
         }
         if plan.date, dateRevisions[id, default: 0] == revisions.date, current.date == original.date,
            let date = result.transactionDate { applySemanticDate(date, to: id, replacingLocal: true) }
-        if result.isCertain, result.payment?.isCertain == true,
+        if result.payment?.isCertain == true,
            let visionDate = result.transactionDate?.date ?? result.transactionDate?.candidates.first,
            ExpenseDate.isValid(visionDate), let index = expenses.firstIndex(where: { $0.id == id }),
            expenses[index].amount.map({ $0 > 0 }) == true,
-           ExpenseDate.isValid(expenses[index].date), expenses[index].category != .uncategorized,
+           ExpenseDate.isValid(expenses[index].date),
+           (result.isCertain || result.purposeSummary?.isCertain == true),
            !expenses[index].purpose.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             let remaining = (expenses[index].warning ?? "").components(separatedBy: "；")
                 .filter { !$0.isEmpty && !$0.hasPrefix("识别失败：") }
@@ -622,6 +652,7 @@ public struct ExpenseExportIssue: Identifiable {
         if categoryRevisions[id, default: 0] > 0,
            !expenses[index].purpose.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             resolved.append("用途分类待确认")
+            if AppIdentity.isVisionTest { resolved.append("用途待确认") }
         }
         if amountRevisions[id, default: 0] > 0, expenses[index].amount.map({ $0 > 0 }) == true {
             resolved += Self.amountWarningFragments
@@ -644,7 +675,9 @@ public struct ExpenseExportIssue: Identifiable {
             acceptAIResult(at: index, removing: Self.amountWarningFragments)
             appendAINote("AI 建议金额 ¥\(amount)：\(payment.reason)", to: id)
         } else {
-            var candidates = payment.candidates.map { AmountCandidate(amount: $0, source: "AI候选：原文金额") }
+            var candidates = payment.candidates.map {
+                AmountCandidate(amount: $0, source: payment.candidateSources[$0].map { "视觉候选：" + $0 } ?? "AI候选：原文金额")
+            }
             candidates += amountCandidates[id] ?? []
             var seen: Set<Decimal> = []
             amountCandidates[id] = Array(candidates.filter { seen.insert($0.amount).inserted }.prefix(6))

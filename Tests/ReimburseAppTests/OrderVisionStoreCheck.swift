@@ -83,6 +83,25 @@ import Foundation
         store.startVisionAI(ocrFailure.id, configuration: config, recognize: { _, _, _ in certainResult })
         await wait(store)
         precondition(store.expenses[0].warning == nil && store.exportBlocker == nil, "Successful complete visual result resolves an OCR-failure warning")
+        var merchantResult = certainResult
+        merchantResult = SemanticClassification(category: .uncategorized, isCertain: false, reason: "综合商户无法确定商品", payment: certainResult.payment, transactionDate: certainResult.transactionDate)
+        merchantResult.purposeSummary = SemanticPurpose(text: "便利店消费", isCertain: true, source: "merchant", reason: "截图仅显示便利店名称")
+        let merchant = merchantResult
+        store.reset(); let merchantRow = row(); store.expenses = [merchantRow]
+        store.startVisionAI(merchantRow.id, configuration: config, recognize: { _, _, _ in merchant })
+        await wait(store)
+        precondition(store.expenses[0].purpose == "便利店消费" && store.expenses[0].category == .uncategorized && store.exportBlocker == nil)
+        store.expenses[0].warning = "用途待确认（视觉 AI）；金额未标明实付"
+        store.markEdited(merchantRow.id, field: .purpose)
+        precondition(store.expenses[0].warning == "金额未标明实付", "Editing purpose must preserve amount warnings")
+        let oldRules = AIConfiguration.orderVisionRules
+        let revision = AIConfiguration.revision
+        try AIConfiguration.saveOrderVisionRules("测试用途规则")
+        precondition(AIConfiguration.orderVisionRules == "测试用途规则" && AIConfiguration.revision > revision)
+        do { try AIConfiguration.saveOrderVisionRules("  "); preconditionFailure("Empty rules accepted") } catch {}
+        AIConfiguration.resetOrderVisionRules()
+        precondition(AIConfiguration.orderVisionRules == OrderVisionClassifier.defaultRules)
+        if oldRules != OrderVisionClassifier.defaultRules { try AIConfiguration.saveOrderVisionRules(oldRules) }
         print("Vision store: all new rows, empty OCR, comparison, manual protection, candidates, refunds, failure, repeat and consent checks passed (offline)")
     }
 }

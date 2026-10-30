@@ -911,7 +911,13 @@ private struct ExpenseRow: View {
                             amountDraft.text = "\(candidate.amount)"
                             amountDraft.edited = false
                         } label: {
-                            Text(verbatim: "\(expense.amount == candidate.amount ? "✓ " : "")¥\(candidate.amount)")
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(verbatim: "\(expense.amount == candidate.amount ? "✓ " : "")¥\(candidate.amount)")
+                                if AppIdentity.isVisionTest, candidate.source.hasPrefix("视觉候选：") {
+                                    Text(String(candidate.source.dropFirst("视觉候选：".count)))
+                                        .font(.caption2).foregroundStyle(.secondary).lineLimit(2)
+                                }
+                            }
                         }
                         .buttonStyle(.bordered)
                         .controlSize(.small)

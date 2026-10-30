@@ -101,6 +101,23 @@ public struct AIRequestConfiguration: Sendable {
             UserDefaults.standard.set(newValue, forKey: prefix + "orderVisionEnabled")
         }
     }
+    static var orderVisionRules: String {
+        guard AppIdentity.isVisionTest else { return OrderVisionClassifier.defaultRules }
+        return UserDefaults.standard.string(forKey: prefix + "orderVisionRules") ?? OrderVisionClassifier.defaultRules
+    }
+    static func saveOrderVisionRules(_ text: String) throws {
+        let rules = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard AppIdentity.isVisionTest, !rules.isEmpty, rules.count <= 12_000 else {
+            throw OrderVisionError.unavailable("识别规则不能为空，且不能超过12000字。")
+        }
+        if orderVisionRules != rules { revision += 1 }
+        UserDefaults.standard.set(rules, forKey: prefix + "orderVisionRules")
+    }
+    static func resetOrderVisionRules() {
+        guard AppIdentity.isVisionTest else { return }
+        if orderVisionRules != OrderVisionClassifier.defaultRules { revision += 1 }
+        UserDefaults.standard.removeObject(forKey: prefix + "orderVisionRules")
+    }
     public static var provider: AIProvider {
         get { AIProvider(rawValue: UserDefaults.standard.string(forKey: prefix + "provider") ?? "") ?? .deepSeek }
         set {
@@ -165,6 +182,7 @@ public struct AIRequestConfiguration: Sendable {
 
 public struct SemanticPayment: Sendable {
     public var isNonExpense: Bool = false
+    public var candidateSources: [Decimal: String] = [:]
     public let amount: Decimal?
     public let isCertain: Bool
     public let reason: String
@@ -178,12 +196,21 @@ public struct SemanticDate: Sendable {
     public let candidates: [String]
 }
 
+public struct SemanticPurpose: Sendable {
+    public let text: String
+    public let isCertain: Bool
+    public let source: String
+    public let reason: String
+}
+
 public struct SemanticClassification: Sendable {
     public let category: ExpenseCategory
     public let isCertain: Bool
     public let reason: String
     public let payment: SemanticPayment?
     public let transactionDate: SemanticDate?
+    public var visionSummary: String? = nil
+    public var purposeSummary: SemanticPurpose? = nil
 
     public init(category: ExpenseCategory, isCertain: Bool, reason: String,
                 payment: SemanticPayment? = nil, transactionDate: SemanticDate? = nil) {
