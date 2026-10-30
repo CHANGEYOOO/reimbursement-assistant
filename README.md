@@ -22,9 +22,11 @@
 
 ### Windows 版
 
-请到 [全部版本下载页面](https://github.com/CHANGEYOOO/reimbursement-assistant/releases) 查找 Windows 安装包。
+[下载 Windows 1.34 安装包](https://github.com/CHANGEYOOO/reimbursement-assistant/releases/download/v1.34.0/ReimbursementAssistant-Windows-1.34-Setup.exe)
 
-Windows 源码已同步 Mac 1.34 的功能流程与业务规则；安装包请以下载页面实际提供的版本为准。
+适用于 **64 位 Windows，推荐 Windows 11**。下载后运行 EXE，按中文提示安装。
+
+Windows 版已同步 Mac 1.34 的主要功能和业务规则。首次运行可能出现 Windows 信誉提示，请确认文件来自本仓库。
 
 ## 快速开始
 
