@@ -3,7 +3,7 @@ set -euo pipefail
 
 project_dir=${0:A:h:h}
 app_name="报销单助手·视觉测试"
-output_dmg="$project_dir/build/报销单助手-视觉测试-1.34.903.dmg"
+output_dmg="$project_dir/build/报销单助手-视觉测试-1.34.905.dmg"
 if [[ -e "$output_dmg" ]]; then
     echo "测试安装包已存在，为避免覆盖请先核对已有文件：$output_dmg" >&2
     exit 1

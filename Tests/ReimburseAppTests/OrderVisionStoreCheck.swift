@@ -94,6 +94,44 @@ import Foundation
         store.expenses[0].warning = "用途待确认（视觉 AI）；金额未标明实付"
         store.markEdited(merchantRow.id, field: .purpose)
         precondition(store.expenses[0].warning == "金额未标明实付", "Editing purpose must preserve amount warnings")
+        // A malformed purpose must not discard valid money/date or replace the local purpose.
+        var invalidPurpose = certainResult
+        invalidPurpose.purposeValidationFailed = true
+        invalidPurpose.validationIssues = ["用途：缺少有效依据，保留原值"]
+        let invalidPurposeResult = invalidPurpose
+        store.reset(); let partialRow = row(); store.expenses = [partialRow]
+        store.startVisionAI(partialRow.id, configuration: config, recognize: { _, _, _ in invalidPurposeResult })
+        await wait(store)
+        precondition(store.expenses[0].amount == 40 && store.expenses[0].date == "2026-10-29", "Good fields still fill")
+        precondition(store.expenses[0].purpose == "餐食费用", "Malformed purpose must preserve existing purpose despite a changed AI category")
+        precondition(store.aiNotes[partialRow.id]?.contains("用途：缺少有效依据") == true && store.exportBlocker != nil, "Invalid field has a specific issue and remains reviewable")
+
+        var invalidAmount = SemanticClassification(category: .uncategorized, isCertain: false, reason: "分类不明", transactionDate: certainResult.transactionDate)
+        invalidAmount.purposeSummary = SemanticPurpose(text: "场地定金", isCertain: true, source: "remark", reason: "转账备注")
+        invalidAmount.validationIssues = ["金额：格式无效，保留原值"]
+        let invalidAmountResult = invalidAmount
+        store.reset(); let invalidMoneyRow = row(); store.expenses = [invalidMoneyRow]
+        store.startVisionAI(invalidMoneyRow.id, configuration: config, recognize: { _, _, _ in invalidAmountResult })
+        await wait(store)
+        precondition(store.expenses[0].amount == 39 && store.expenses[0].purpose == "场地定金" && store.expenses[0].date == "2026-10-29")
+        precondition(store.exportBlocker != nil, "A malformed AI amount retains local amount and review warning")
+        store.markEdited(invalidMoneyRow.id, field: .amount)
+        store.expenses[0].amount = 200
+        precondition(store.expenses[0].warning?.contains("金额待核对") != true, "Manual amount resolves only its own validation warning")
+
+        var localPurpose = row(); localPurpose.purpose = "本地笼统用途"
+        store.reset(); store.expenses = [localPurpose]
+        store.startVisionAI(localPurpose.id, configuration: config, recognize: { _, _, _ in merchant })
+        await wait(store)
+        precondition(store.expenses[0].purpose == "便利店消费", "Unedited local purpose yields to AI semantic summary")
+        store.reset(); store.expenses = [localPurpose]
+        store.startVisionAI(localPurpose.id, configuration: config, recognize: { _, _, _ in
+            try await Task.sleep(nanoseconds: 20_000_000); return merchant
+        })
+        store.markEdited(localPurpose.id, field: .purpose); store.expenses[0].purpose = "我填写的用途"
+        await wait(store)
+        precondition(store.expenses[0].purpose == "我填写的用途", "Higher AI purpose priority never overrides a manual edit")
+
         let oldRules = AIConfiguration.orderVisionRules
         let revision = AIConfiguration.revision
         try AIConfiguration.saveOrderVisionRules("测试用途规则")
@@ -102,6 +140,31 @@ import Foundation
         AIConfiguration.resetOrderVisionRules()
         precondition(AIConfiguration.orderVisionRules == OrderVisionClassifier.defaultRules)
         if oldRules != OrderVisionClassifier.defaultRules { try AIConfiguration.saveOrderVisionRules(oldRules) }
+        let originalPreferences = AIConfiguration.orderVisionPreferences
+        defer { try? AIConfiguration.saveOrderVisionSettings(preferences: originalPreferences, advancedRules: oldRules) }
+        var preferences = OrderVisionPreferences.defaults
+        preferences.extraInstructions = "用途保留转账备注"
+        try AIConfiguration.saveOrderVisionSettings(preferences: preferences, advancedRules: "原有高级规则")
+        precondition(AIConfiguration.orderVisionRules == "原有高级规则", "Legacy advanced text retained")
+        precondition(AIConfiguration.orderVisionPreferences == preferences && AIConfiguration.effectiveOrderVisionRules.contains("用途保留转账备注"))
+        let stableRevision = AIConfiguration.revision
+        try AIConfiguration.saveOrderVisionSettings(preferences: preferences, advancedRules: "原有高级规则")
+        precondition(AIConfiguration.revision == stableRevision, "Saving unchanged settings does not invalidate requests")
+        var badPreferences = preferences; badPreferences.extraInstructions = String(repeating: "x", count: 2001)
+        do { try AIConfiguration.saveOrderVisionSettings(preferences: badPreferences, advancedRules: "不应保存"); preconditionFailure("Invalid settings accepted") } catch {}
+        precondition(AIConfiguration.orderVisionRules == "原有高级规则" && AIConfiguration.orderVisionPreferences == preferences && AIConfiguration.revision == stableRevision, "Validation happens before all writes")
+        store.reset(); let rulesRow = row(); store.expenses = [rulesRow]
+        store.startVisionAI(rulesRow.id, configuration: config, recognize: { _, _, _ in
+            try await Task.sleep(nanoseconds: 20_000_000); return merchant
+        })
+        preferences.purposeStyle = .merchant
+        try AIConfiguration.saveOrderVisionSettings(preferences: preferences, advancedRules: "原有高级规则")
+        await wait(store)
+        precondition(store.expenses[0].purpose == rulesRow.purpose && store.aiNotes[rulesRow.id]?.contains("已改变") == true, "Changed rules discard in-flight old results")
+        store.automaticallyAssistUnresolvedExpenses()
+        precondition(store.aiPendingIDs.isEmpty, "Changed preferences don't repeat attempted rows")
+        AIConfiguration.resetOrderVisionSettings()
+        precondition(AIConfiguration.orderVisionRules == OrderVisionClassifier.defaultRules && AIConfiguration.orderVisionPreferences == .defaults, "Reset restores both preferences and advanced rules")
         print("Vision store: all new rows, empty OCR, comparison, manual protection, candidates, refunds, failure, repeat and consent checks passed (offline)")
     }
 }

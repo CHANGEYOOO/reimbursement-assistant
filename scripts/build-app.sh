@@ -11,8 +11,8 @@ swift_flags=()
 if [[ "$vision_test" == 1 ]]; then
     app_name="报销单助手·视觉测试"
     bundle_identifier="top.kjoe.ReimburseMacApp.vision-test"
-    app_version="1.34.903"
-    app_build="903"
+    app_version="1.34.905"
+    app_build="905"
     swift_flags=(-Xswiftc -DREIMBURSE_VISION_TEST)
 fi
 output_app="${REIMBURSE_OUTPUT_APP:-$project_dir/build/$app_name.app}"

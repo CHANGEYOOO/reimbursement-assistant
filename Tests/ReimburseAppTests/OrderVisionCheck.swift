@@ -27,7 +27,7 @@ import UniformTypeIdentifiers
         precondition(customInstruction.contains("用户业务规则：年份2026") && customInstruction.contains("固定输出协议") && customInstruction.contains("candidate_details") && customInstruction.contains("不可信数据"), "Custom business rules cannot remove the fixed response and untrusted-input protocol")
         precondition(!customInstruction.contains("金额先找实付"), "Custom rules replace the default business portion")
         try rejects { _ = try OrderVisionClassifier.makeRequest(imageURL: source, text: "", configuration: configuration, rules: "  \n ") }
-        try rejects { _ = try OrderVisionClassifier.makeRequest(imageURL: source, text: "", configuration: configuration, rules: String(repeating: "长", count: 12_001)) }
+        try rejects { _ = try OrderVisionClassifier.makeRequest(imageURL: source, text: "", configuration: configuration, rules: String(repeating: "长", count: 16_001)) }
         let content = messages[1]["content"] as! [[String: Any]]
         let images = content.filter { $0["type"] as? String == "image_url" }
         precondition(images.count == 1, "Empty OCR must still send a readable image")
@@ -61,27 +61,71 @@ import UniformTypeIdentifiers
         precondition(otherPage.payment?.amount == nil && otherPage.category == .meals && otherPage.transactionDate?.date != nil, "Unknown page holds money without losing unrelated fields")
         let explained = try OrderVisionClassifier.decodeResponse(decorated(answer(amount: nil, paymentCertainty: "uncertain", candidates: ["39.50", "45.00"]), page: "payment_detail", state: "paid", evidence: "支付标签对应39.50，45.00是订单合计", details: [["amount":"39.50","label":"实付候选"],["amount":"45.00","label":"订单合计"]]), statusCode: 200, referenceDate: reference)
         precondition(explained.payment?.candidateSources[Decimal(string: "39.50")!] == "实付候选" && explained.visionSummary?.contains("支付详情") == true && explained.visionSummary?.contains("支付标签") == true)
-        try rejects { _ = try OrderVisionClassifier.decodeResponse(decorated(response, page: "payment_detail", state: "paid", details: [["amount":"999.00","label":"不属于候选"]]), statusCode: 200, referenceDate: reference) }
+        let invalidDetail = try OrderVisionClassifier.decodeResponse(decorated(response, page: "payment_detail", state: "paid", details: [["amount":"999.00","label":"不属于候选"]]), statusCode: 200, referenceDate: reference)
+        precondition(invalidDetail.payment?.amount == Decimal(string: "39.50") && invalidDetail.validationIssues.contains(where: { $0.contains("候选说明") }), "Invalid optional explanation cannot discard a valid amount")
         let merchantPurpose = try OrderVisionClassifier.decodeResponse(decorated(response, purpose: ["text":"便利店消费","certainty":"high","source":"merchant","reason":"无商品明细，按店名概括"]), statusCode: 200, referenceDate: reference)
         precondition(merchantPurpose.purposeSummary?.text == "便利店消费" && merchantPurpose.purposeSummary?.isCertain == true)
         let remarkPurpose = try OrderVisionClassifier.decodeResponse(decorated(response, purpose: ["text":"拍摄场地租赁","certainty":"high","source":"remark","reason":"转账备注明确写明场地租赁"]), statusCode: 200, referenceDate: reference)
         precondition(remarkPurpose.purposeSummary?.source == "remark")
         let unknownPurpose = try OrderVisionClassifier.decodeResponse(decorated(response, purpose: ["text":"商户消费","certainty":"uncertain","source":"unknown","reason":"仅有模糊商户名"]), statusCode: 200, referenceDate: reference)
         precondition(unknownPurpose.purposeSummary?.isCertain == false && result.purposeSummary == nil, "Unknown purpose not auto-filled; old payload remains compatible")
-        try rejects { _ = try OrderVisionClassifier.decodeResponse(decorated(response, purpose: ["text":"","certainty":"high","source":"merchant","reason":"没有内容"]), statusCode: 200, referenceDate: reference) }
-        try rejects { _ = try OrderVisionClassifier.decodeResponse(decorated(response, purpose: ["text":"猜测用途","certainty":"high","source":"unknown","reason":"无法判断"]), statusCode: 200, referenceDate: reference) }
-        try rejects { _ = try OrderVisionClassifier.decodeResponse(decorated(response, purpose: ["text":String(repeating:"长",count:41),"certainty":"high","source":"items","reason":"过长"]), statusCode: 200, referenceDate: reference) }
+        for invalidPurpose in [
+            ["text":"","certainty":"high","source":"merchant","reason":"没有内容"],
+            ["text":"猜测用途","certainty":"high","source":"unknown","reason":"无法判断"],
+            ["text":String(repeating:"长",count:41),"certainty":"high","source":"items","reason":"过长"]
+        ] {
+            let independent = try OrderVisionClassifier.decodeResponse(decorated(response, purpose: invalidPurpose), statusCode: 200, referenceDate: reference)
+            precondition(independent.purposeSummary == nil && independent.purposeValidationFailed && independent.payment?.isCertain == true && independent.transactionDate?.date != nil && independent.validationIssues.contains(where: { $0.hasPrefix("用途：") }), "Bad purpose cannot discard payment/date")
+        }
+        let nullPurpose = try OrderVisionClassifier.decodeResponse(edited(response) { $0["purpose"] = NSNull() }, statusCode: 200, referenceDate: reference)
+        precondition(nullPurpose.purposeValidationFailed && nullPurpose.purposeSummary == nil && nullPurpose.payment?.isCertain == true, "Explicit null purpose is invalid; only missing legacy purpose permits compatibility fallback")
         let monthDay = try OrderVisionClassifier.decodeResponse(answer(date: "10-16"), statusCode: 200, referenceDate: reference)
         precondition(monthDay.transactionDate?.date == "2026-10-16" && monthDay.transactionDate?.reason.contains("2026") == true)
         let approximate = try OrderVisionClassifier.decodeResponse(answer(date: nil, dateCertainty: "uncertain", dates: ["10-16"]), statusCode: 200, referenceDate: reference)
         precondition(approximate.transactionDate?.candidates == ["2026-10-16"])
         let explicitYear = try OrderVisionClassifier.decodeResponse(answer(date: "2024-10-16"), statusCode: 200, referenceDate: reference)
         precondition(explicitYear.transactionDate?.date == "2024-10-16")
-        try rejects { _ = try OrderVisionClassifier.decodeResponse(answer(amount: nil), statusCode: 200, referenceDate: reference) }
-        try rejects { _ = try OrderVisionClassifier.decodeResponse(answer(category: "不支持分类"), statusCode: 200, referenceDate: reference) }
-        try rejects { _ = try OrderVisionClassifier.decodeResponse(answer(date: "2026-02-30"), statusCode: 200, referenceDate: reference) }
-        try rejects { _ = try OrderVisionClassifier.decodeResponse(answer(amount: "1e3"), statusCode: 200, referenceDate: reference) }
-        try rejects { _ = try OrderVisionClassifier.decodeResponse(answer(candidates: Array(repeating: "39.50", count: 7)), statusCode: 200, referenceDate: reference) }
+        let noSupplement = try OrderVisionClassifier.decodeResponse(answer(date: "10-16"), statusCode: 200, referenceDate: reference, allowYearSupplement: false)
+        precondition(noSupplement.transactionDate == nil && noSupplement.payment?.isCertain == true && noSupplement.validationIssues.contains(where: { $0.contains("不允许自动补充年份") }))
+        let completeWithoutSupplement = try OrderVisionClassifier.decodeResponse(answer(date: "2024-10-16"), statusCode: 200, referenceDate: reference, allowYearSupplement: false)
+        precondition(completeWithoutSupplement.transactionDate?.date == "2024-10-16")
+        let invalidMetadata = try OrderVisionClassifier.decodeResponse(edited(response) { report in
+            var payment = report["payment"] as! [String:Any]
+            payment["candidate_details"] = "不是候选说明列表"; payment["evidence"] = 42
+            report["payment"] = payment
+        }, statusCode: 200, referenceDate: reference)
+        precondition(invalidMetadata.payment?.amount == Decimal(string: "39.50") && invalidMetadata.payment?.isCertain == true && invalidMetadata.validationIssues.count == 2, "Malformed optional explanations cannot discard core fields")
+        let longEvidence = try OrderVisionClassifier.decodeResponse(decorated(response, evidence: String(repeating: "长", count: 201)), statusCode: 200, referenceDate: reference)
+        precondition(longEvidence.payment?.isCertain == true && longEvidence.validationIssues.contains(where: { $0.contains("说明过长") }))
+        for badMoney in [try answer(amount: nil), try answer(amount: "1e3"), try answer(candidates: Array(repeating: "39.50", count: 7))] {
+            let independent = try OrderVisionClassifier.decodeResponse(badMoney, statusCode: 200, referenceDate: reference)
+            precondition(independent.payment == nil && independent.transactionDate?.date == "2026-10-16" && independent.isCertain && independent.validationIssues.contains(where: { $0.hasPrefix("金额：") }), "Bad payment cannot discard other fields")
+        }
+        let badCategory = try OrderVisionClassifier.decodeResponse(answer(category: "不支持分类"), statusCode: 200, referenceDate: reference)
+        precondition(badCategory.categoryValidationFailed && badCategory.payment?.isCertain == true && badCategory.transactionDate?.date != nil)
+        let badDate = try OrderVisionClassifier.decodeResponse(answer(date: "2026-02-30"), statusCode: 200, referenceDate: reference)
+        precondition(badDate.transactionDate == nil && badDate.payment?.isCertain == true && badDate.validationIssues.contains(where: { $0.hasPrefix("日期：") }))
+        let conflictingMoney = try OrderVisionClassifier.decodeResponse(answer(candidates: ["45.00"]), statusCode: 200, referenceDate: reference)
+        precondition(conflictingMoney.payment?.isCertain == false && conflictingMoney.payment?.amount == nil && conflictingMoney.payment?.candidates == [Decimal(string:"39.50")!,45] && conflictingMoney.validationIssues.contains(where: { $0.contains("不一致") }))
+        let conflictingDate = try OrderVisionClassifier.decodeResponse(answer(dates: ["2026-10-17"]), statusCode: 200, referenceDate: reference)
+        precondition(conflictingDate.transactionDate == nil && conflictingDate.payment?.isCertain == true && conflictingDate.validationIssues.contains(where: { $0.contains("确定日期与候选日期不一致") }), "Conflicting date must not become an auto-filled approximate date")
+        let numeric = try OrderVisionClassifier.decodeResponse(edited(response) { report in
+            var payment = report["payment"] as! [String:Any]
+            payment["amount"] = -39.5
+            payment.removeValue(forKey: "candidates")
+            report["payment"] = payment
+            var date = report["transaction_date"] as! [String:Any]
+            date["candidates"] = NSNull(); report["transaction_date"] = date
+        }, statusCode: 200, referenceDate: reference)
+        precondition(numeric.payment?.amount == Decimal(string:"39.50") && numeric.transactionDate?.date == "2026-10-16" && numeric.validationIssues.isEmpty, "Numeric amounts and absent/null candidates are valid")
+        let malformedAmount = try OrderVisionClassifier.decodeResponse(edited(decorated(response, purpose: ["text":"停车费","certainty":"high","source":"items","reason":"停车服务"])) { report in
+            var payment = report["payment"] as! [String:Any]; payment["amount"] = true; report["payment"] = payment
+        }, statusCode: 200, referenceDate: reference)
+        precondition(malformedAmount.payment == nil && malformedAmount.purposeSummary?.text == "停车费" && malformedAmount.transactionDate?.date != nil, "Malformed numeric field doesn't affect purpose/date")
+        let missing = try OrderVisionClassifier.decodeResponse(edited(response) { $0.removeValue(forKey: "payment") }, statusCode: 200, referenceDate: reference)
+        precondition(missing.payment == nil && missing.transactionDate?.date != nil && missing.validationIssues.contains(where: { $0.contains("AI 未返回") }))
+        let wrongTypePurpose = try OrderVisionClassifier.decodeResponse(edited(response) { $0["purpose"] = ["text":42] }, statusCode: 200, referenceDate: reference)
+        precondition(wrongTypePurpose.purposeValidationFailed && wrongTypePurpose.payment?.isCertain == true && wrongTypePurpose.transactionDate?.date != nil)
         try rejects { _ = try OrderVisionClassifier.decodeResponse(answer(finish: "length"), statusCode: 200, referenceDate: reference) }
         try rejects { _ = try OrderVisionClassifier.decodeResponse(answer(choiceCount: 2), statusCode: 200, referenceDate: reference) }
         try rejects { _ = try OrderVisionClassifier.decodeResponse(response, statusCode: 401, referenceDate: reference) }
@@ -149,6 +193,16 @@ import UniformTypeIdentifiers
         if let details { payment["candidate_details"] = details }
         if let purpose { report["purpose"] = purpose }
         report["payment"] = payment
+        message["content"] = String(data: try JSONSerialization.data(withJSONObject: report), encoding: .utf8)!
+        choices[0]["message"] = message; envelope["choices"] = choices
+        return try JSONSerialization.data(withJSONObject: envelope)
+    }
+    static func edited(_ data: Data, change: (inout [String:Any]) -> Void) throws -> Data {
+        var envelope = try JSONSerialization.jsonObject(with: data) as! [String:Any]
+        var choices = envelope["choices"] as! [[String:Any]]
+        var message = choices[0]["message"] as! [String:Any]
+        var report = try JSONSerialization.jsonObject(with: Data((message["content"] as! String).utf8)) as! [String:Any]
+        change(&report)
         message["content"] = String(data: try JSONSerialization.data(withJSONObject: report), encoding: .utf8)!
         choices[0]["message"] = message; envelope["choices"] = choices
         return try JSONSerialization.data(withJSONObject: envelope)

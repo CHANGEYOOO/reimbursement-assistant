@@ -404,9 +404,15 @@ public struct ExpenseExportIssue: Identifiable {
     func markEdited(_ id: UUID, field: Field) {
         if let index = expenses.firstIndex(where: { $0.id == id }) {
             expenses[index].aiRecognized = nil
-            if AppIdentity.isVisionTest && field == .purpose {
+            if AppIdentity.isVisionTest {
+                let fragments: [String]
+                switch field {
+                case .purpose, .category: fragments = ["用途待确认", "用途分类待确认"]
+                case .amount: fragments = ["金额待核对（视觉 AI 返回无效"]
+                case .date: fragments = ["日期待核对（视觉 AI 返回无效"]
+                }
                 let remaining = (expenses[index].warning ?? "").components(separatedBy: "；")
-                    .filter { !$0.isEmpty && !$0.contains("用途待确认") && !$0.contains("用途分类待确认") }
+                    .filter { !$0.isEmpty && !fragments.contains(where: $0.contains) }
                 expenses[index].warning = remaining.isEmpty ? nil : remaining.joined(separator: "；")
             }
         }
@@ -475,10 +481,11 @@ public struct ExpenseExportIssue: Identifiable {
               let original = expenses.first(where: { $0.id == id }) else { return }
         let token = UUID()
         let configurationRevision = AIConfiguration.revision
-        let visionRules = AIConfiguration.orderVisionRules
+        let visionRules = AIConfiguration.effectiveOrderVisionRules
+        let allowYearSupplement = AIConfiguration.orderVisionPreferences.supplementYear
         let revisions = (category: categoryRevisions[id, default: 0], amount: amountRevisions[id, default: 0], date: dateRevisions[id, default: 0])
         let before = "识别前：金额 \(original.amount.map { "¥\($0)" } ?? "未填写") / 日期 \(original.date.isEmpty ? "未填写" : original.date) / \(original.category.rawValue)"
-        let text = recognizedTexts[id] ?? ""
+        let text = "" // Visual mode uses the screenshot alone, without local OCR or rule-derived text.
         visionAttemptedIDs.insert(id)
         aiTokens[id] = token
         aiPendingIDs.insert(id)
@@ -488,7 +495,7 @@ public struct ExpenseExportIssue: Identifiable {
                 let result: SemanticClassification
                 if let recognize { result = try await recognize(original.sourceURL, text, configuration) }
                 else {
-                    result = try await OrderVisionClassifier.classify(imageURL: original.sourceURL, text: text, configuration: configuration, rules: visionRules,
+                    result = try await OrderVisionClassifier.classify(imageURL: original.sourceURL, text: text, configuration: configuration, rules: visionRules, allowYearSupplement: allowYearSupplement,
                         authorized: { @Sendable [self] in
                             await MainActor.run {
                                 return self.aiTokens[id] == token && AIConfiguration.enabled && AIConfiguration.orderVisionEnabled && AIConfiguration.revision == configurationRevision
@@ -504,7 +511,7 @@ public struct ExpenseExportIssue: Identifiable {
                 applyVisionResult(result, original: original, revisions: revisions, plan: plan, before: before)
             } catch {
                 guard aiTokens[id] == token else { return }
-                aiNotes[id] = before + "\n视觉 AI 未完成：\(error.localizedDescription)。本地结果保留，请核对；可点“重测选中订单”再次尝试。"
+                aiNotes[id] = before + "\n视觉 AI 未完成：\(error.localizedDescription)。已有填写内容保留；可点“重测选中订单”再次尝试。"
             }
             guard aiTokens[id] == token else { return }
             finishAI(id)
@@ -522,10 +529,9 @@ public struct ExpenseExportIssue: Identifiable {
         if plan.category, categoryRevisions[id, default: 0] == revisions.category,
            current.category == original.category, current.purpose == original.purpose,
            let index = expenses.firstIndex(where: { $0.id == id }) {
-            if result.isCertain && result.category != .uncategorized {
-                applySemanticClassification(result, to: id)
-            } else {
-                expenses[index].category = .uncategorized
+            if !result.categoryValidationFailed {
+                expenses[index].category = result.isCertain ? result.category : .uncategorized
+                appendAINote("分类：\(result.category.rawValue)；\(result.reason)", to: id)
             }
             if let purpose = result.purposeSummary, purpose.isCertain,
                !purpose.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -533,7 +539,7 @@ public struct ExpenseExportIssue: Identifiable {
                 acceptAIResult(at: index, removing: ["用途分类待确认", "用途待确认"])
                 let source = ["items": "商品明细", "remark": "转账备注", "bill": "账单说明", "merchant": "商户信息"][purpose.source] ?? "截图信息"
                 appendAINote("用途：\(purpose.text)（\(source)）；\(purpose.reason)", to: id)
-            } else if result.purposeSummary != nil || !result.isCertain || result.category == .uncategorized {
+            } else if !result.purposeValidationFailed && (result.purposeSummary != nil || (!result.categoryValidationFailed && (!result.isCertain || result.category == .uncategorized))) {
                 let oldDefault = current.category == .uncategorized ? "" : current.category.rawValue + "费用"
                 if current.purpose.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || current.purpose == oldDefault {
                     expenses[index].purpose = ""
@@ -541,6 +547,13 @@ public struct ExpenseExportIssue: Identifiable {
                 confirmedWarnings.remove(id)
                 expenses[index].warning = [expenses[index].warning, "用途待确认（视觉 AI）"].compactMap { $0 }.joined(separator: "；")
                 appendAINote("视觉 AI 未能总结可靠用途，请手动填写：\(result.purposeSummary?.reason ?? result.reason)", to: id)
+            } else if result.purposeSummary == nil && !result.purposeValidationFailed && !result.categoryValidationFailed && result.isCertain {
+                // Older responses lack an independent purpose; only then retain the category-based fallback.
+                let oldDefault = current.category == .uncategorized ? "" : current.category.rawValue + "费用"
+                if current.purpose.isEmpty || current.purpose == oldDefault {
+                    expenses[index].purpose = result.category.rawValue + "费用"
+                }
+                acceptAIResult(at: index, removing: ["用途分类待确认"])
             }
         }
         if plan.amount, amountRevisions[id, default: 0] == revisions.amount, current.amount == original.amount,
@@ -565,6 +578,27 @@ public struct ExpenseExportIssue: Identifiable {
             let remaining = (expenses[index].warning ?? "").components(separatedBy: "；")
                 .filter { !$0.isEmpty && !$0.hasPrefix("识别失败：") }
             expenses[index].warning = remaining.isEmpty ? nil : remaining.joined(separator: "；")
+        }
+        for issue in result.validationIssues { appendAINote("校验提示：" + issue, to: id) }
+        if let index = expenses.firstIndex(where: { $0.id == id }) {
+            var warnings: [String] = []
+            if plan.amount, amountRevisions[id, default: 0] == revisions.amount, current.amount == original.amount,
+               result.payment == nil, result.validationIssues.contains(where: { $0.hasPrefix("金额：") }) {
+                warnings.append("金额待核对（视觉 AI 返回无效，已保留原值）")
+            }
+            if plan.date, dateRevisions[id, default: 0] == revisions.date, current.date == original.date,
+               result.transactionDate == nil, result.validationIssues.contains(where: { $0.hasPrefix("日期：") }) {
+                warnings.append("日期待核对（视觉 AI 返回无效，已保留原值）")
+            }
+            if plan.category, categoryRevisions[id, default: 0] == revisions.category, current.purpose == original.purpose,
+               result.purposeValidationFailed {
+                warnings.append("用途待确认（视觉 AI 返回无效，已保留原值）")
+            }
+            if !warnings.isEmpty {
+                confirmedWarnings.remove(id)
+                expenses[index].warning = ([expenses[index].warning].compactMap { $0 } + warnings).joined(separator: "；")
+                expenses[index].aiRecognized = nil
+            }
         }
         appendAINote("手动修改或重开后已保存的字段会保留，重测结果显示在此处供对比。", to: id)
     }
@@ -692,7 +726,7 @@ public struct ExpenseExportIssue: Identifiable {
         if let date, ExpenseDate.isValid(date) {
             expenses[index].date = date
             dateCandidates[id] = []
-            acceptAIResult(at: index, removing: [])
+            acceptAIResult(at: index, removing: AppIdentity.isVisionTest ? ["日期待核对（视觉 AI 返回无效"] : [])
             appendAINote("AI 已填写日期 \(date)\(result.isCertain ? "" : "（参考日期）")：\(result.reason)", to: id)
         } else {
             dateCandidates[id] = result.candidates.filter(ExpenseDate.isValid)
@@ -797,16 +831,36 @@ public struct ExpenseExportIssue: Identifiable {
         Task { await recognizeExpense(id: id, url: url, token: token) }
     }
 
-    private func recognizeExpense(id: UUID, url: URL, token: UUID) async {
-        guard recognitionTokens[id] == token else { return }
+    private func startVisionInsteadOfLocalRecognition(_ id: UUID, recognize: (@MainActor (UUID) -> Void)?) -> Bool {
+        guard AppIdentity.isVisionTest, AIConfiguration.enabled, AIConfiguration.orderVisionEnabled else { return false }
+        recognitionTokens.removeValue(forKey: id)
+        pendingIDs.remove(id)
+        editedFields.removeValue(forKey: id)
+        if let index = expenses.firstIndex(where: { $0.id == id }), expenses[index].warning == "正在识别…" {
+            expenses[index].warning = nil
+        }
+        if let recognize { recognize(id) }
+        else { classifyWithVisionAI(id) }
+        return true
+    }
+
+    func recognizeExpense(id: UUID, url: URL, token: UUID? = nil,
+                          recognizeLocally: @escaping @Sendable (URL) async throws -> Suggestion = Recognition.recognize,
+                          recognizeVisually: (@MainActor (UUID) -> Void)? = nil) async {
+        guard let token = token ?? recognitionTokens[id], recognitionTokens[id] == token else { return }
+        if startVisionInsteadOfLocalRecognition(id, recognize: recognizeVisually) { return }
         do {
             let suggestion = try await Task.detached(priority: .userInitiated) {
-                try await Recognition.recognize(url)
+                try await recognizeLocally(url)
             }.value
             guard recognitionTokens[id] == token else { return }
+            // If the user enabled AI while local OCR was running, discard the local result.
+            if startVisionInsteadOfLocalRecognition(id, recognize: recognizeVisually) { return }
             applySuggestion(suggestion, to: id)
         } catch {
-            if recognitionTokens[id] == token, let index = expenses.firstIndex(where: { $0.id == id }) {
+            guard recognitionTokens[id] == token else { return }
+            if startVisionInsteadOfLocalRecognition(id, recognize: recognizeVisually) { return }
+            if let index = expenses.firstIndex(where: { $0.id == id }) {
                 expenses[index].warning = "识别失败：\(error.localizedDescription)。请手动填写并确认。"
             }
         }
@@ -814,6 +868,7 @@ public struct ExpenseExportIssue: Identifiable {
         recognitionTokens.removeValue(forKey: id)
         pendingIDs.remove(id)
         editedFields.removeValue(forKey: id)
+        if AppIdentity.isVisionTest { visionAttemptedIDs.insert(id) }
         automaticallyAssist(id)
     }
 }

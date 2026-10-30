@@ -12,15 +12,15 @@ struct AISettingsView: View {
                 Toggle("启用 AI 辅助识别", isOn: $state.enabled)
                     .disabled(state.testing)
                 if AppIdentity.isVisionTest {
-                    Toggle("允许每张新订单截图上传 AI 进行视觉识别", isOn: $state.orderVisionEnabled)
+                    Toggle("使用 AI 视觉识别订单截图（上传图片）", isOn: $state.orderVisionEnabled)
                         .disabled(state.testing)
-                    Text("视觉测试版：同时启用 AI 并允许截图上传后，每张新导入的非重复订单都会发送截图和本地识别文字；即使本地已识别也会调用。图片可能包含姓名、地址、账号等隐私信息，服务可能收费。请配置支持图片输入的模型，纯文字模型无法用于此测试。")
+                    Text("视觉测试版：开启后，每张新导入的非重复订单仅上传截图，由 AI 视觉识别金额、日期和用途，不运行本地 OCR 或规则，也不以本地结果补填。关闭 AI 或此选项时使用本地识别。图片可能包含姓名、地址、账号等隐私信息，服务可能收费；请使用支持图片输入的模型。")
                         .font(.callout).foregroundStyle(.orange)
                     Text("项目、密钥和设置与正式版独立，需重新填写配置。同一记录只自动尝试一次；保存项目后重开不会自动重复上传。更换模型后可点“重测选中订单”，会再次产生请求。手动修改或重开后已保存的字段会保留，重测结果在行内显示供对比。测试连接仅验证文字。")
                         .font(.caption).foregroundStyle(.secondary)
                     Text("用途会根据商品、转账备注、账单说明或商户名称概括；只有店名时也可填写“某便利店消费”，分类仍可留待分类。")
                         .font(.caption).foregroundStyle(.secondary)
-                    Button("AI 识别规则…") { state.showingRules = true }
+                    Button("AI 识别偏好…") { state.showingRules = true }
                         .disabled(state.testing)
                 }
 
@@ -53,8 +53,14 @@ struct AISettingsView: View {
                 SecureField("API Key（留空保留该服务商已保存的密钥）", text: $state.key)
                     .textFieldStyle(.roundedBorder)
                     .disabled(state.testing)
-                Text("密钥保存在 Mac 钥匙串。阿里百炼地址需与密钥地域一致，也可填写业务空间专属地址。")
+                Text(state.provider == .qianwen
+                     ? "使用 platform.qianwenai.com 创建的 API Key。默认 qwen3-vl-plus 支持截图识别；密钥独立保存在 Mac 钥匙串。"
+                     : "密钥保存在 Mac 钥匙串。阿里百炼地址需与密钥地域一致，也可填写业务空间专属地址。")
                     .font(.caption).foregroundStyle(.secondary)
+                if state.provider == .qianwen {
+                    Link("打开千问 AI 平台", destination: URL(string: "https://platform.qianwenai.com/home")!)
+                        .font(.caption)
+                }
                 if !state.message.isEmpty { Text(state.message).font(.callout).textSelection(.enabled) }
                 HStack {
                     Button(state.testing ? "正在测试…" : "测试连接") { Task { await state.test() } }
@@ -73,7 +79,7 @@ struct AISettingsView: View {
         .frame(width: 620, height: 510)
         .onChange(of: state.provider) { _, _ in state.load() }
         .sheet(isPresented: $state.showingRules) {
-            OrderVisionRulesView(saved: saved)
+            OrderVisionRulesView()
         }
     }
 }

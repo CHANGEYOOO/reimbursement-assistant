@@ -2,11 +2,12 @@ import Foundation
 import Security
 
 public enum AIProvider: String, Codable, CaseIterable, Identifiable, Sendable {
-    case deepSeek, aliyun, custom
+    case deepSeek, qianwen, aliyun, custom
     public var id: String { rawValue }
     public var title: String {
         switch self {
         case .deepSeek: "DeepSeek"
+        case .qianwen: "千问 AI 平台"
         case .aliyun: "阿里百炼"
         case .custom: "自定义兼容接口"
         }
@@ -14,6 +15,7 @@ public enum AIProvider: String, Codable, CaseIterable, Identifiable, Sendable {
     public var defaultProfile: AIProfile {
         switch self {
         case .deepSeek: AIProfile(endpoint: "https://api.deepseek.com/chat/completions", model: "deepseek-flash")
+        case .qianwen: AIProfile(endpoint: "https://maas.qianwenaiapi.com/compatible-mode/v1/chat/completions", model: "qwen3-vl-plus")
         case .aliyun: AIProfile(endpoint: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions", model: "qwen-plus")
         case .custom: AIProfile(endpoint: "", model: "")
         }
@@ -118,6 +120,35 @@ public struct AIRequestConfiguration: Sendable {
         if orderVisionRules != OrderVisionClassifier.defaultRules { revision += 1 }
         UserDefaults.standard.removeObject(forKey: prefix + "orderVisionRules")
     }
+    static var orderVisionPreferences: OrderVisionPreferences {
+        guard AppIdentity.isVisionTest,
+              let data = UserDefaults.standard.data(forKey: prefix + "orderVisionPreferences"),
+              let preferences = try? JSONDecoder().decode(OrderVisionPreferences.self, from: data),
+              let validated = try? preferences.validated() else { return .defaults }
+        return validated
+    }
+    static var effectiveOrderVisionRules: String {
+        guard AppIdentity.isVisionTest else { return OrderVisionClassifier.defaultRules }
+        return orderVisionPreferences.composedRules(base: orderVisionRules)
+    }
+    static func saveOrderVisionSettings(preferences: OrderVisionPreferences, advancedRules: String) throws {
+        let preferences = try preferences.validated()
+        let rules = advancedRules.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard AppIdentity.isVisionTest, !rules.isEmpty, rules.count <= 12_000,
+              preferences.composedRules(base: rules).count <= 16_000 else {
+            throw OrderVisionError.unavailable("高级规则不能为空，且不能超过12000字；全部规则合计不能超过16000字。")
+        }
+        let data = try JSONEncoder().encode(preferences)
+        if orderVisionRules != rules || orderVisionPreferences != preferences { revision += 1 }
+        UserDefaults.standard.set(rules, forKey: prefix + "orderVisionRules")
+        UserDefaults.standard.set(data, forKey: prefix + "orderVisionPreferences")
+    }
+    static func resetOrderVisionSettings() {
+        guard AppIdentity.isVisionTest else { return }
+        if orderVisionRules != OrderVisionClassifier.defaultRules || orderVisionPreferences != .defaults { revision += 1 }
+        UserDefaults.standard.removeObject(forKey: prefix + "orderVisionRules")
+        UserDefaults.standard.removeObject(forKey: prefix + "orderVisionPreferences")
+    }
     public static var provider: AIProvider {
         get { AIProvider(rawValue: UserDefaults.standard.string(forKey: prefix + "provider") ?? "") ?? .deepSeek }
         set {
@@ -211,6 +242,9 @@ public struct SemanticClassification: Sendable {
     public let transactionDate: SemanticDate?
     public var visionSummary: String? = nil
     public var purposeSummary: SemanticPurpose? = nil
+    public var validationIssues: [String] = []
+    public var categoryValidationFailed = false
+    public var purposeValidationFailed = false
 
     public init(category: ExpenseCategory, isCertain: Bool, reason: String,
                 payment: SemanticPayment? = nil, transactionDate: SemanticDate? = nil) {
