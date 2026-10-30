@@ -59,8 +59,7 @@ private struct InboxSnapshot: Codable {
     private var filesDirectory: URL { directory.appendingPathComponent("files", isDirectory: true) }
 
     public init(directory: URL? = nil, projectsDirectory: URL? = nil) {
-        self.directory = directory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("报销单助手/InvoiceInbox", isDirectory: true)
+        self.directory = directory ?? AppIdentity.supportDirectory.appendingPathComponent("InvoiceInbox", isDirectory: true)
         self.projectsDirectory = projectsDirectory ?? DraftStorage.directory
         do {
             try FileManager.default.createDirectory(at: filesDirectory, withIntermediateDirectories: true)

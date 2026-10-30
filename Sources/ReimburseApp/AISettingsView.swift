@@ -11,8 +11,17 @@ struct AISettingsView: View {
                 Text("AI 辅助识别设置").font(.title2)
                 Toggle("启用 AI 辅助识别", isOn: $state.enabled)
                     .disabled(state.testing)
-                Text("保存并启用后，订单中本地未识别的用途、金额或日期会自动交给 AI，当前待处理记录也会接续处理。仅发送识别文字；月日可按当前年份补全。明确结果直接填写并可导出；日期可自动采用有原文依据的参考日期，金额和用途仍不确定时才需要处理。")
-                    .font(.callout).foregroundStyle(.secondary)
+                if AppIdentity.isVisionTest {
+                    Toggle("允许每张新订单截图上传 AI 进行视觉识别", isOn: $state.orderVisionEnabled)
+                        .disabled(state.testing)
+                    Text("视觉测试版：同时启用 AI 并允许截图上传后，每张新导入的非重复订单都会发送截图和本地识别文字；即使本地已识别也会调用。图片可能包含姓名、地址、账号等隐私信息，服务可能收费。请配置支持图片输入的模型，纯文字模型无法用于此测试。")
+                        .font(.callout).foregroundStyle(.orange)
+                    Text("项目、密钥和设置与正式版独立，需重新填写配置。同一记录只自动尝试一次；保存项目后重开不会自动重复上传。更换模型后可点“重测选中订单”，会再次产生请求。手动修改或重开后已保存的字段会保留，重测结果在行内显示供对比。测试连接仅验证文字。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+
+                if !AppIdentity.isVisionTest { Text("保存并启用后，订单中本地未识别的用途、金额或日期会自动交给 AI，当前待处理记录也会接续处理。仅发送识别文字；月日可按当前年份补全。明确结果直接填写并可导出；日期可自动采用有原文依据的参考日期，金额和用途仍不确定时才需要处理。")
+                    .font(.callout).foregroundStyle(.secondary) }
                 Divider()
                 Toggle("允许发票 AI 兜底上传文字和页面预览", isOn: $state.invoiceFallbackEnabled)
                     .disabled(!state.enabled || state.testing)
@@ -65,6 +74,7 @@ struct AISettingsView: View {
 @MainActor private final class AISettingsState: ObservableObject {
     @Published var enabled = AIConfiguration.enabled
     @Published var invoiceFallbackEnabled = AIConfiguration.invoiceFallbackEnabled
+    @Published var orderVisionEnabled = AIConfiguration.orderVisionEnabled
     @Published var provider = AIConfiguration.provider
     @Published var endpoint = ""
     @Published var model = ""
@@ -98,6 +108,7 @@ struct AISettingsView: View {
             try AIConfiguration.save(profile: AIProfile(endpoint: endpoint, model: model), apiKey: key, provider: provider)
             AIConfiguration.provider = provider
             AIConfiguration.enabled = enabled
+            if AppIdentity.isVisionTest { AIConfiguration.orderVisionEnabled = orderVisionEnabled }
             AIConfiguration.invoiceFallbackEnabled = invoiceFallbackEnabled
             key = ""
             message = "已保存，当前使用\(provider.title)。"

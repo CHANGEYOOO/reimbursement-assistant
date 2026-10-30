@@ -44,7 +44,7 @@ enum InvoiceNotificationPolicy {
             guard preferenceRevision == revision else { return }
             enabled = granted
             UserDefaults.standard.set(granted, forKey: Self.enabledKey)
-            permissionMessage = granted ? "新发票通知已开启。" : "请在系统设置 → 通知 → 报销单助手中允许通知。"
+            permissionMessage = granted ? "新发票通知已开启。" : "请在系统设置 → 通知 → \(AppIdentity.displayName)中允许通知。"
         } catch {
             guard preferenceRevision == revision else { return }
             permissionMessage = "无法开启通知：\(error.localizedDescription)"
@@ -57,7 +57,7 @@ enum InvoiceNotificationPolicy {
             let settings = await center.notificationSettings()
             guard enabled else { return }
             guard settings.authorizationStatus == .authorized || settings.authorizationStatus == .provisional else {
-                permissionMessage = "系统通知未允许，请在系统设置 → 通知 → 报销单助手中开启。"
+                permissionMessage = "系统通知未允许，请在系统设置 → 通知 → \(AppIdentity.displayName)中开启。"
                 return
             }
             let content = UNMutableNotificationContent()

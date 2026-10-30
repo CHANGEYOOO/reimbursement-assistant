@@ -220,8 +220,7 @@ actor InvoiceAIService {
     private var flights: [String: Task<InvoiceAIAssessment, Never>] = [:]
     private var cacheError = false
 
-    init(cacheURL: URL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        .appendingPathComponent("报销单助手/InvoiceAI/cache.json"), sender: @escaping Sender = AIHTTPClient.send) {
+    init(cacheURL: URL = AppIdentity.supportDirectory.appendingPathComponent("InvoiceAI/cache.json"), sender: @escaping Sender = AIHTTPClient.send) {
         self.cacheURL = cacheURL; self.sender = sender
         if FileManager.default.fileExists(atPath: cacheURL.path) {
             do { cache = try JSONDecoder().decode([String: InvoiceAIAssessment].self, from: Data(contentsOf: cacheURL)).filter { $0.value.attempted || $0.value.report != nil } }

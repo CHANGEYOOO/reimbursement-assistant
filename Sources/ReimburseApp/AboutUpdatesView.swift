@@ -4,14 +4,14 @@ import SwiftUI
 
 @MainActor private final class AboutUpdatesState: ObservableObject {
     let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "未知"
-    let appName = Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String ?? "报销单助手"
+    let appName = Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String ?? AppIdentity.displayName
     @Published var checking = false
-    @Published var status = "点击检查更新，查看 GitHub 上的最新正式版本。"
+    @Published var status = AppIdentity.isVisionTest ? "视觉测试版独立安装，不参与正式版更新。" : "点击检查更新，查看 GitHub 上的最新正式版本。"
     @Published var result: UpdateCheckResult?
     @Published var checkedAt: Date?
 
     func check() async {
-        guard !checking else { return }
+        guard !AppIdentity.isVisionTest, !checking else { return }
         checking = true
         defer { checking = false }
         result = nil
@@ -49,7 +49,7 @@ struct AboutUpdatesView: View {
             }
             HStack {
                 Button(state.checking ? "正在检查…" : "检查更新") { Task { await state.check() } }
-                    .disabled(state.checking)
+                    .disabled(state.checking || AppIdentity.isVisionTest)
                 if state.checking { ProgressView().controlSize(.small) }
             }
             Text(state.status).textSelection(.enabled)
@@ -78,7 +78,7 @@ struct AboutUpdatesView: View {
                 }
             }
             Spacer(minLength: 0)
-            Text("更新来自 GitHub Releases。仅在你点击后打开下载页面，不会自动安装或替换应用。")
+            Text(AppIdentity.isVisionTest ? "这是订单视觉识别专用测试版。正式版与测试版的数据、设置和密钥独立，不会互相替换。" : "更新来自 GitHub Releases。仅在你点击后打开下载页面，不会自动安装或替换应用。")
                 .font(.caption).foregroundStyle(.secondary)
         }.padding(24).frame(width: 620, height: 510)
     }

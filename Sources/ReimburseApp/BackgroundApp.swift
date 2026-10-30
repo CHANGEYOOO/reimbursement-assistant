@@ -125,7 +125,7 @@ import SwiftUI
         lastStatus = status
         enabled = status == .enabled || status == .requiresApproval
         if status == .requiresApproval {
-            message = "请在系统设置 → 通用 → 登录项中允许报销单助手。"
+            message = "请在系统设置 → 通用 → 登录项中允许\(AppIdentity.displayName)。"
         } else if changed { message = "" }
     }
 
@@ -156,7 +156,7 @@ struct BackgroundStatusMenu: View {
     @Environment(\.openSettings) private var openSettings
 
     var body: some View {
-        Text("报销单助手")
+        Text(AppIdentity.displayName)
         if mailbox.syncing { Text("正在同步邮件信息…") }
         else if let date = mailbox.lastSyncAt {
             Text("上次同步：\(date.formatted(date: .omitted, time: .shortened))")
@@ -164,7 +164,7 @@ struct BackgroundStatusMenu: View {
         Text("未分配发票：\(inbox.items.filter { $0.projectID == nil && $0.isAcceptedInvoice }.count) 张")
         Text("\(mailbox.status.prefix(40))\(mailbox.status.count > 40 ? "…" : "")").help(mailbox.status)
         Divider()
-        Button("打开报销单助手") {
+        Button("打开\(AppIdentity.displayName)") {
             openWindow(id: "main")
             AppRuntime.shared.showMainWindow()
         }

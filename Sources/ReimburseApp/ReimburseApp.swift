@@ -6,12 +6,12 @@ public struct ReimburseApp: App {
     public init() {}
 
     public var body: some Scene {
-        Window("报销单助手", id: "main") {
+        Window(AppIdentity.displayName, id: "main") {
             ReviewView()
                 .background(MainWindowAttachment(delegate: appDelegate).frame(width: 0, height: 0))
         }
         Settings { AppSettingsView() }
-        MenuBarExtra("报销单助手", systemImage: "doc.text.image") {
+        MenuBarExtra(AppIdentity.displayName, systemImage: AppIdentity.isVisionTest ? "eye.fill" : "doc.text.image") {
             BackgroundStatusMenu()
         }
     }

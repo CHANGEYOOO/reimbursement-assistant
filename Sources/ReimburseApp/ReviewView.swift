@@ -49,6 +49,13 @@ public struct ReviewView: View {
                 }.frame(minWidth: 800, minHeight: 620)
             } else { projectContent }
         }
+        .safeAreaInset(edge: .top, spacing: 0) {
+            if AppIdentity.isVisionTest {
+                Label("视觉测试版 · 每张新截图均可上传 AI · 数据与正式版独立", systemImage: "eye.fill")
+                    .font(.callout).frame(maxWidth: .infinity).padding(8)
+                    .background(Color.orange.opacity(0.14))
+            }
+        }
         .onAppear {
             restoreDraft()
             refreshProjects()
@@ -139,7 +146,7 @@ public struct ReviewView: View {
             }
             .padding(12)
         }
-        .navigationTitle("报销单助手")
+        .navigationTitle(AppIdentity.displayName)
     }
 
     private func refreshProjects() {
@@ -189,6 +196,12 @@ public struct ReviewView: View {
                             .disabled(invoices.acceptedInvoices.isEmpty || controls.exportingInvoices || invoices.confirmationCount > 0)
                     } else {
                         Button("导入截图") { chooseImages() }
+                        #if REIMBURSE_VISION_TEST
+                        Button("重测选中订单") {
+                            if let id = selection.selectedID { store.classifyWithVisionAI(id) }
+                        }
+                        .disabled(selection.selectedID == nil || selection.selectedID.map { store.pendingIDs.contains($0) || store.aiPendingIDs.contains($0) } == true)
+                        #endif
                         Spacer()
                         Button("导出 Excel") { saveWorkbook() }
                             .disabled(store.expenses.isEmpty)

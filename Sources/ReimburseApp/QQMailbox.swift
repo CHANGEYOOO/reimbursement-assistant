@@ -35,7 +35,7 @@ public enum QQMailboxError: LocalizedError {
 
 @MainActor public enum QQMailboxConfiguration {
     private static let prefix = "reimbursement.qqmail."
-    private static let service = "top.kjoe.ReimburseMacApp.qqmail"
+    private static let service = AppIdentity.keychainService("qqmail")
     public private(set) static var revision = 0
     public static var enabled: Bool { UserDefaults.standard.bool(forKey: prefix + "enabled") }
     public static var address: String { UserDefaults.standard.string(forKey: prefix + "address") ?? "" }

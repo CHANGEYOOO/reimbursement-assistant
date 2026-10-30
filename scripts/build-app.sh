@@ -2,9 +2,26 @@
 set -euo pipefail
 
 project_dir=${0:A:h:h}
-output_app="${REIMBURSE_OUTPUT_APP:-$project_dir/build/报销单助手.app}"
+vision_test="${REIMBURSE_VISION_TEST:-0}"
+app_name="报销单助手"
+bundle_identifier="top.kjoe.ReimburseMacApp"
+app_version="1.34"
+app_build="38"
+swift_flags=()
+if [[ "$vision_test" == 1 ]]; then
+    app_name="报销单助手·视觉测试"
+    bundle_identifier="top.kjoe.ReimburseMacApp.vision-test"
+    app_version="1.34.902"
+    app_build="902"
+    swift_flags=(-Xswiftc -DREIMBURSE_VISION_TEST)
+fi
+output_app="${REIMBURSE_OUTPUT_APP:-$project_dir/build/$app_name.app}"
+if [[ "$vision_test" == 1 && "${output_app:t}" != "$app_name.app" ]]; then
+    echo "视觉测试版必须使用独立应用文件名：$app_name.app" >&2
+    exit 1
+fi
 work_dir=$(/usr/bin/mktemp -d /private/tmp/reimbursement-app-build.XXXXXX)
-app_dir="$work_dir/报销单助手.app"
+app_dir="$work_dir/$app_name.app"
 contents_dir="$app_dir/Contents"
 icon_source="$project_dir/Assets/AppIcon.png"
 iconset_dir="$work_dir/AppIcon.iconset"
@@ -13,14 +30,18 @@ export CLANG_MODULE_CACHE_PATH="$work_dir/clang-cache"
 export SWIFT_MODULECACHE_PATH="$work_dir/swift-cache"
 
 cd "$project_dir"
-/usr/bin/swift build --disable-sandbox --cache-path "$work_dir/cache" --manifest-cache local --configuration release -debug-info-format none --scratch-path "$work_dir/swift-build" --product ReimburseMacApp
-binary_dir=$(/usr/bin/swift build --disable-sandbox --cache-path "$work_dir/cache" --manifest-cache local --configuration release --scratch-path "$work_dir/swift-build" --show-bin-path)
+/usr/bin/swift build --disable-sandbox --cache-path "$work_dir/cache" --manifest-cache local --configuration release -debug-info-format none --scratch-path "$work_dir/swift-build" --product ReimburseMacApp "${swift_flags[@]}"
+binary_dir=$(/usr/bin/swift build --disable-sandbox --cache-path "$work_dir/cache" --manifest-cache local --configuration release --scratch-path "$work_dir/swift-build" --show-bin-path "${swift_flags[@]}")
 
 /bin/mkdir -p "$contents_dir/MacOS"
 /bin/cp "$binary_dir/ReimburseMacApp" "$contents_dir/MacOS/ReimburseMacApp"
 /bin/chmod 755 "$contents_dir/MacOS/ReimburseMacApp"
 
 /bin/mkdir -p "$contents_dir/Resources" "$iconset_dir"
+if [[ "$vision_test" == 1 ]]; then
+    icon_source="$work_dir/VisionTestIcon.png"
+    /usr/bin/swift -module-cache-path "$work_dir/swift-cache" "$project_dir/scripts/make-vision-test-icon.swift" "$icon_source"
+fi
 for size in 16 32 128 256 512; do
     /usr/bin/sips -z "$size" "$size" "$icon_source" --out "$iconset_dir/icon_${size}x${size}.png" >/dev/null
     double_size=$((size * 2))
@@ -28,26 +49,30 @@ for size in 16 32 128 256 512; do
 done
 /usr/bin/swift "$project_dir/scripts/make-icns.swift" "$iconset_dir" "$contents_dir/Resources/AppIcon.icns"
 
-cat > "$contents_dir/Info.plist" <<'PLIST'
+cat > "$contents_dir/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>CFBundleDevelopmentRegion</key><string>zh_CN</string>
-    <key>CFBundleDisplayName</key><string>报销单助手</string>
+    <key>CFBundleDisplayName</key><string>$app_name</string>
     <key>CFBundleExecutable</key><string>ReimburseMacApp</string>
-    <key>CFBundleIdentifier</key><string>top.kjoe.ReimburseMacApp</string>
+    <key>CFBundleIdentifier</key><string>$bundle_identifier</string>
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>
-    <key>CFBundleName</key><string>报销单助手</string>
+    <key>CFBundleName</key><string>$app_name</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>1.34</string>
-    <key>CFBundleVersion</key><string>38</string>
+    <key>CFBundleShortVersionString</key><string>$app_version</string>
+    <key>CFBundleVersion</key><string>$app_build</string>
     <key>LSMinimumSystemVersion</key><string>15.0</string>
     <key>NSHighResolutionCapable</key><true/>
 </dict>
 </plist>
 PLIST
+
+if [[ "$vision_test" == 1 ]]; then
+    /usr/libexec/PlistBuddy -c "Add :ReimbursementVisionTest bool true" "$contents_dir/Info.plist"
+fi
 
 release_remote=$(/usr/bin/git -C "$project_dir" remote get-url origin)
 if [[ "$release_remote" == https://github.com/* ]]; then

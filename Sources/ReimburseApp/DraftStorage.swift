@@ -27,8 +27,7 @@ struct DraftSnapshot: Codable {
 
     public static var directory: URL {
         if let directoryOverride { return directoryOverride }
-        return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("报销单助手/Drafts", isDirectory: true)
+        return AppIdentity.supportDirectory.appendingPathComponent("Drafts", isDirectory: true)
     }
 
     public static func list() throws -> [DraftSummary] {

@@ -43,6 +43,7 @@ public struct ExpenseExportIssue: Identifiable {
     @Published public private(set) var aiPendingIDs: Set<UUID> = []
     @Published public private(set) var aiNotes: [UUID: String] = [:]
     private var aiTokens: [UUID: UUID] = [:]
+    private var visionAttemptedIDs: Set<UUID> = []
     private var categoryRevisions: [UUID: Int] = [:]
     private var amountRevisions: [UUID: Int] = [:]
     private var dateRevisions: [UUID: Int] = [:]
@@ -77,6 +78,7 @@ public struct ExpenseExportIssue: Identifiable {
     }
 
     private func clearUndo() {
+        visionAttemptedIDs = []
         aiTokens = [:]
         aiPendingIDs = []
         aiNotes = [:]
@@ -116,6 +118,7 @@ public struct ExpenseExportIssue: Identifiable {
     func restore(_ snapshot: DraftSnapshot) {
         clearUndo()
         expenses = snapshot.expenses
+        visionAttemptedIDs = Set(snapshot.expenses.map(\.id)).subtracting(snapshot.pendingIDs)
         pendingIDs = snapshot.pendingIDs
         confirmedWarnings = snapshot.confirmedWarnings
         recognizedTexts = snapshot.recognizedTexts
@@ -434,8 +437,106 @@ public struct ExpenseExportIssue: Identifiable {
     }
 
     private func automaticallyAssist(_ id: UUID) {
+        if AppIdentity.isVisionTest {
+            if AIConfiguration.enabled, AIConfiguration.orderVisionEnabled, !visionAttemptedIDs.contains(id) { classifyWithVisionAI(id) }
+            return
+        }
         guard AIConfiguration.enabled, let plan = automaticAIPlan(for: id) else { return }
         classifyWithAI(id, includeCategory: plan.category, includeAmount: plan.amount, includeDate: plan.date)
+    }
+
+    func visionAIPlan(for id: UUID) -> AutomaticAIPlan? {
+        guard AppIdentity.isVisionTest, AIConfiguration.orderVisionEnabled,
+              !pendingIDs.contains(id), !aiPendingIDs.contains(id),
+              let expense = expenses.first(where: { $0.id == id }), !expense.isDuplicate else { return nil }
+        return AutomaticAIPlan(category: categoryRevisions[id, default: 0] == 0,
+                               amount: amountRevisions[id, default: 0] == 0,
+                               date: dateRevisions[id, default: 0] == 0)
+    }
+
+    public func classifyWithVisionAI(_ id: UUID) {
+        guard AIConfiguration.enabled, visionAIPlan(for: id) != nil else { return }
+        do {
+            guard let configuration = try AIConfiguration.currentRequest() else { return }
+            startVisionAI(id, configuration: configuration)
+        } catch { aiNotes[id] = "视觉 AI 配置不可用：\(error.localizedDescription)" }
+    }
+
+    func startVisionAI(_ id: UUID, configuration: AIRequestConfiguration,
+                       recognize: (@Sendable (URL, String, AIRequestConfiguration) async throws -> SemanticClassification)? = nil) {
+        guard AIConfiguration.enabled, let plan = visionAIPlan(for: id),
+              let original = expenses.first(where: { $0.id == id }) else { return }
+        let token = UUID()
+        let configurationRevision = AIConfiguration.revision
+        let revisions = (category: categoryRevisions[id, default: 0], amount: amountRevisions[id, default: 0], date: dateRevisions[id, default: 0])
+        let before = "识别前：金额 \(original.amount.map { "¥\($0)" } ?? "未填写") / 日期 \(original.date.isEmpty ? "未填写" : original.date) / \(original.category.rawValue)"
+        let text = recognizedTexts[id] ?? ""
+        visionAttemptedIDs.insert(id)
+        aiTokens[id] = token
+        aiPendingIDs.insert(id)
+        aiNotes[id] = before + "\n视觉 AI 正在识别截图…"
+        Task {
+            do {
+                let result: SemanticClassification
+                if let recognize { result = try await recognize(original.sourceURL, text, configuration) }
+                else {
+                    result = try await OrderVisionClassifier.classify(imageURL: original.sourceURL, text: text, configuration: configuration,
+                        authorized: { @Sendable [self] in
+                            await MainActor.run {
+                                return self.aiTokens[id] == token && AIConfiguration.enabled && AIConfiguration.orderVisionEnabled && AIConfiguration.revision == configurationRevision
+                            }
+                        })
+                }
+                guard aiTokens[id] == token else { return }
+                guard AIConfiguration.enabled, AIConfiguration.orderVisionEnabled, AIConfiguration.revision == configurationRevision else {
+                    aiNotes[id] = before + "\n配置或上传授权已改变，视觉结果未应用。"
+                    finishAI(id)
+                    return
+                }
+                applyVisionResult(result, original: original, revisions: revisions, plan: plan, before: before)
+            } catch {
+                guard aiTokens[id] == token else { return }
+                aiNotes[id] = before + "\n视觉 AI 未完成：\(error.localizedDescription)。本地结果保留，请核对；可点“重测选中订单”再次尝试。"
+            }
+            guard aiTokens[id] == token else { return }
+            finishAI(id)
+        }
+    }
+
+    func applyVisionResult(_ result: SemanticClassification, original: Expense,
+                           revisions: (category: Int, amount: Int, date: Int), plan: AutomaticAIPlan, before: String) {
+        let id = original.id
+        guard let current = expenses.first(where: { $0.id == id }), !current.isDuplicate else { return }
+        let amount = result.payment?.amount.map { "¥\($0)" } ?? "未确定"
+        let date = result.transactionDate?.date ?? result.transactionDate?.candidates.first ?? "未确定"
+        aiNotes[id] = before + "\n视觉结果：\(amount) / \(date) / \(result.category.rawValue)"
+        if plan.category, categoryRevisions[id, default: 0] == revisions.category,
+           current.category == original.category, current.purpose == original.purpose {
+            applySemanticClassification(result, to: id)
+        }
+        if plan.amount, amountRevisions[id, default: 0] == revisions.amount, current.amount == original.amount,
+           let payment = result.payment {
+            if !payment.isCertain || payment.isNonExpense, let index = expenses.firstIndex(where: { $0.id == id }) {
+                expenses[index].amount = nil
+                amountCandidates[id] = []
+                confirmedWarnings.remove(id)
+                expenses[index].warning = [expenses[index].warning, "未能确定实付金额（视觉 AI），请人工核对"].compactMap { $0 }.joined(separator: "；")
+            }
+            applySemanticPayment(payment, to: id, alreadyRequested: true)
+        }
+        if plan.date, dateRevisions[id, default: 0] == revisions.date, current.date == original.date,
+           let date = result.transactionDate { applySemanticDate(date, to: id, replacingLocal: true) }
+        if result.isCertain, result.payment?.isCertain == true,
+           let visionDate = result.transactionDate?.date ?? result.transactionDate?.candidates.first,
+           ExpenseDate.isValid(visionDate), let index = expenses.firstIndex(where: { $0.id == id }),
+           expenses[index].amount.map({ $0 > 0 }) == true,
+           ExpenseDate.isValid(expenses[index].date), expenses[index].category != .uncategorized,
+           !expenses[index].purpose.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let remaining = (expenses[index].warning ?? "").components(separatedBy: "；")
+                .filter { !$0.isEmpty && !$0.hasPrefix("识别失败：") }
+            expenses[index].warning = remaining.isEmpty ? nil : remaining.joined(separator: "；")
+        }
+        appendAINote("手动修改或重开后已保存的字段会保留，重测结果显示在此处供对比。", to: id)
     }
 
     public func classifyWithAI(_ id: UUID, includeCategory: Bool = true,
@@ -551,9 +652,9 @@ public struct ExpenseExportIssue: Identifiable {
         }
     }
 
-    func applySemanticDate(_ result: SemanticDate, to id: UUID) {
+    func applySemanticDate(_ result: SemanticDate, to id: UUID, replacingLocal: Bool = false) {
         guard let index = expenses.firstIndex(where: { $0.id == id }), !expenses[index].isDuplicate,
-              !ExpenseDate.isValid(expenses[index].date) else { return }
+              replacingLocal || !ExpenseDate.isValid(expenses[index].date) else { return }
         let date = result.isCertain ? result.date : result.candidates.first(where: ExpenseDate.isValid) ?? result.date
         if let date, ExpenseDate.isValid(date) {
             expenses[index].date = date

@@ -78,7 +78,7 @@ public struct AIRequestConfiguration: Sendable {
 
 @MainActor public enum AIConfiguration {
     private static let prefix = "reimbursement.ai."
-    private static let keychainService = "top.kjoe.ReimburseMacApp.ai"
+    private static let keychainService = AppIdentity.keychainService("ai")
     public private(set) static var revision = 0
     public static var enabled: Bool {
         get { UserDefaults.standard.bool(forKey: prefix + "enabled") }
@@ -92,6 +92,13 @@ public struct AIRequestConfiguration: Sendable {
         set {
             if invoiceFallbackEnabled != newValue { revision += 1 }
             UserDefaults.standard.set(newValue, forKey: prefix + "invoiceFallbackEnabled")
+        }
+    }
+    public static var orderVisionEnabled: Bool {
+        get { AppIdentity.isVisionTest && UserDefaults.standard.bool(forKey: prefix + "orderVisionEnabled") }
+        set {
+            if orderVisionEnabled != newValue { revision += 1 }
+            UserDefaults.standard.set(newValue, forKey: prefix + "orderVisionEnabled")
         }
     }
     public static var provider: AIProvider {
@@ -157,6 +164,7 @@ public struct AIRequestConfiguration: Sendable {
 }
 
 public struct SemanticPayment: Sendable {
+    public var isNonExpense: Bool = false
     public let amount: Decimal?
     public let isCertain: Bool
     public let reason: String
