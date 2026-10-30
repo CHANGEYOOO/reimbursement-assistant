@@ -15,12 +15,27 @@ import UniformTypeIdentifiers
         let request = try OrderVisionClassifier.makeRequest(imageURL: source, text: "", configuration: configuration, referenceDate: reference)
         let body = try JSONSerialization.jsonObject(with: request.httpBody!) as! [String: Any]
         precondition(body["model"] as? String == "vision-test")
+        precondition(body["max_tokens"] as? Int == 4096, "Visual output budget must fit the complete JSON")
+        precondition(body["thinking"] == nil && body["enable_thinking"] == nil, "Generic compatible endpoints must not get provider-specific parameters")
+        for model in ["deepseek-flash", "deepseek-v4-flash", "deepseek-v4-flash-vision-exp"] {
+            let deepSeek = try AIRequestConfiguration(endpoint: URL(string: "https://api.deepseek.com/chat/completions")!, model: model, apiKey: "offline-not-sent")
+            let deepSeekRequest = try OrderVisionClassifier.makeRequest(imageURL: source, text: "", configuration: deepSeek)
+            let deepSeekBody = try JSONSerialization.jsonObject(with: deepSeekRequest.httpBody!) as! [String: Any]
+            precondition((deepSeekBody["thinking"] as? [String: String])?["type"] == "disabled")
+            precondition(deepSeekBody["enable_thinking"] == nil, "DeepSeek must not receive Qwen's parameter")
+        }
+        let otherDeepSeekModel = try AIRequestConfiguration(endpoint: URL(string: "https://api.deepseek.com/chat/completions")!, model: "custom-model", apiKey: "offline-not-sent")
+        let otherRequest = try OrderVisionClassifier.makeRequest(imageURL: source, text: "", configuration: otherDeepSeekModel)
+        let otherBody = try JSONSerialization.jsonObject(with: otherRequest.httpBody!) as! [String: Any]
+        precondition(otherBody["thinking"] == nil)
+
         precondition(request.value(forHTTPHeaderField: "Authorization") == "Bearer offline-secret")
         precondition(!String(data: request.httpBody!, encoding: .utf8)!.contains("offline-secret"))
         let messages = body["messages"] as! [[String: Any]]
         let defaultInstruction = messages[0]["content"] as! String
         precondition(defaultInstruction.contains("公历年2026") && !defaultInstruction.contains("{{CURRENT_YEAR}}"))
         precondition(OrderVisionClassifier.defaultRules.contains("{{CURRENT_YEAR}}"))
+        precondition(defaultInstruction.contains("每个reason不超过60字") && defaultInstruction.contains("evidence不超过80字"), "Fixed output instructions keep explanations short even for saved custom rules")
         let customRequest = try OrderVisionClassifier.makeRequest(imageURL: source, text: "", configuration: configuration, referenceDate: reference, rules: "用户业务规则：年份{{CURRENT_YEAR}}，用途保留商户名")
         let customBody = try JSONSerialization.jsonObject(with: customRequest.httpBody!) as! [String: Any]
         let customInstruction = ((customBody["messages"] as! [[String: Any]])[0]["content"] as! String)
@@ -153,6 +168,17 @@ import UniformTypeIdentifiers
         let mock = MockSender(response: response)
         let classified = try await OrderVisionClassifier.classify(imageURL: source, text: "", configuration: configuration, referenceDate: reference, sender: mock.send)
         precondition(classified.payment?.amount == Decimal(string: "39.50"))
+        for failure in [(try answer(finish: "length"), 200, false), (response, 429, false), (response, 200, true)] {
+            let once = MockSender(response: failure.0, status: failure.1, networkFailure: failure.2)
+            do {
+                _ = try await OrderVisionClassifier.classify(imageURL: source, text: "", configuration: configuration, sender: once.send)
+                preconditionFailure("Expected failure")
+            } catch {
+                if failure.1 == 200 && !failure.2 { precondition(error.localizedDescription.contains("不会自动重试")) }
+            }
+            let attempts = await once.count
+            precondition(attempts == 1, "Truncation, HTTP and network failure must never retry automatically")
+        }
         let count = await mock.count; precondition(count == 1)
         do {
             _ = try await OrderVisionClassifier.classify(imageURL: source, text: "", configuration: configuration, sender: mock.send, authorized: { false })
@@ -213,9 +239,15 @@ import UniformTypeIdentifiers
         func check() -> Bool { checks += 1; return checks == 1 }
     }
     actor MockSender {
-        var count = 0; let response: Data
-        init(response: Data) { self.response = response }
-        func send(_ request: URLRequest) async throws -> (Data, Int) { count += 1; precondition(request.url?.host == "example.invalid"); return (response, 200) }
+        var count = 0; let response: Data; let status: Int; let networkFailure: Bool
+        init(response: Data, status: Int = 200, networkFailure: Bool = false) {
+            self.response = response; self.status = status; self.networkFailure = networkFailure
+        }
+        func send(_ request: URLRequest) async throws -> (Data, Int) {
+            count += 1; precondition(request.url?.host == "example.invalid")
+            if networkFailure { throw URLError(.cannotConnectToHost) }
+            return (response, status)
+        }
     }
 }
 #endif

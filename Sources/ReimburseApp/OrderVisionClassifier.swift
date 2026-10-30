@@ -47,7 +47,7 @@ enum OrderVisionClassifier {
         以下为用户设置的业务识别规则；如与后面的固定输出协议冲突，以固定输出协议为准。
         \(businessRules.replacingOccurrences(of: "{{CURRENT_YEAR}}", with: String(year)))
         固定输出协议：
-        各字段独立判断确定性；用途或金额不确定不能阻止其他字段。certainty仅high/uncertain，每个reason用不超过200字的明确依据。待分类不能为high。只输出一个JSON对象，无其他文字：
+        各字段独立判断确定性；用途或金额不确定不能阻止其他字段。certainty仅high/uncertain，每个reason不超过60字，payment.evidence不超过80字，候选label不超过12字。说明只写关键依据，不重复、不逐行转写截图、不输出思考过程。使用紧凑JSON。待分类不能为high。只输出一个JSON对象，无其他文字：
         {"page_type":"payment_detail/order_detail/order_list/refund_detail/other中的一个","category":"交通/餐食/住宿/道具采购/其他/待分类中的一个","certainty":"high或uncertain","reason":"分类依据","purpose":{"text":"简短用途概括","certainty":"high或uncertain","source":"items/remark/bill/merchant/unknown中的一个","reason":"用途依据"},"payment":{"amount":null,"certainty":"uncertain","direction":"expense/refund/income/uncertain中的一个","state":"paid/refund_entry/refund_processing/full_refund/partial_refund/split_payment/unknown中的一个","reason":"金额依据","evidence":"支付标签、位置及排除依据","candidates":[],"candidate_details":[]},"transaction_date":{"date":null,"certainty":"uncertain","reason":"日期依据","candidates":[]}}
         确定金额及金额候选均输出十进制字符串、不带货币单位；确定日期及日期候选均输出日期字符串。
         """
@@ -60,10 +60,16 @@ enum OrderVisionClassifier {
         request.timeoutInterval = 45
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("Bearer " + configuration.apiKey, forHTTPHeaderField: "Authorization")
-        request.httpBody = try JSONSerialization.data(withJSONObject: [
-            "model": configuration.model, "stream": false, "max_tokens": 1600,
+        var body: [String: Any] = [
+            "model": configuration.model, "stream": false, "max_tokens": 4096,
             "messages": [["role": "system", "content": instruction], ["role": "user", "content": content]]
-        ])
+        ]
+        // Only documented official Flash models get DeepSeek's nonstandard thinking parameter.
+        if configuration.endpoint.host?.lowercased() == "api.deepseek.com",
+           ["deepseek-flash", "deepseek-v4-flash", "deepseek-v4-flash-vision-exp"].contains(configuration.model) {
+            body["thinking"] = ["type": "disabled"]
+        }
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
         return request
     }
 
@@ -124,7 +130,7 @@ enum OrderVisionClassifier {
             throw OrderVisionError.unavailable("视觉模型返回了多个结果或没有结果，未应用。")
         }
         guard choice.finish_reason == nil || choice.finish_reason == "stop" else {
-            throw OrderVisionError.unavailable(choice.finish_reason == "length" ? "视觉模型输出被截断，未应用，请重试。" : "视觉模型未正常完成输出，未应用。")
+            throw OrderVisionError.unavailable(choice.finish_reason == "length" ? "视觉模型输出达到长度上限，结果未应用，不会自动重试。" : "视觉模型未正常完成输出，未应用。")
         }
         var content = choice.message.content.trimmingCharacters(in: .whitespacesAndNewlines)
         if content.hasPrefix("```"), content.hasSuffix("```"), let newline = content.firstIndex(of: "\n") {
