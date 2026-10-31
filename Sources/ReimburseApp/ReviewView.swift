@@ -196,12 +196,12 @@ public struct ReviewView: View {
                             .disabled(invoices.acceptedInvoices.isEmpty || controls.exportingInvoices || invoices.confirmationCount > 0)
                     } else {
                         Button("导入截图") { chooseImages() }
-                        #if REIMBURSE_VISION_TEST
-                        Button("重测选中订单") {
-                            if let id = selection.selectedID { store.classifyWithVisionAI(id) }
+                        if AIConfiguration.enabled && AIConfiguration.orderVisionEnabled {
+                            Button("重测选中订单") {
+                                if let id = selection.selectedID { store.classifyWithVisionAI(id) }
+                            }
+                            .disabled(selection.selectedID == nil || selection.selectedID.map { store.pendingIDs.contains($0) || store.aiPendingIDs.contains($0) } == true)
                         }
-                        .disabled(selection.selectedID == nil || selection.selectedID.map { store.pendingIDs.contains($0) || store.aiPendingIDs.contains($0) } == true)
-                        #endif
                         Spacer()
                         Button("导出 Excel") { saveWorkbook() }
                             .disabled(store.expenses.isEmpty)
@@ -913,7 +913,7 @@ private struct ExpenseRow: View {
                         } label: {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(verbatim: "\(expense.amount == candidate.amount ? "✓ " : "")¥\(candidate.amount)")
-                                if AppIdentity.isVisionTest, candidate.source.hasPrefix("视觉候选：") {
+                                if candidate.source.hasPrefix("视觉候选：") {
                                     Text(String(candidate.source.dropFirst("视觉候选：".count)))
                                         .font(.caption2).foregroundStyle(.secondary).lineLimit(2)
                                 }

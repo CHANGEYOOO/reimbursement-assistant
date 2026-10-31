@@ -97,31 +97,27 @@ public struct AIRequestConfiguration: Sendable {
         }
     }
     public static var orderVisionEnabled: Bool {
-        get { AppIdentity.isVisionTest && UserDefaults.standard.bool(forKey: prefix + "orderVisionEnabled") }
+        get { UserDefaults.standard.bool(forKey: prefix + "orderVisionEnabled") }
         set {
             if orderVisionEnabled != newValue { revision += 1 }
             UserDefaults.standard.set(newValue, forKey: prefix + "orderVisionEnabled")
         }
     }
     static var archivedOrderVisionRules: String? {
-        guard AppIdentity.isVisionTest else { return nil }
         return UserDefaults.standard.string(forKey: prefix + "orderVisionRules")
     }
     static var orderVisionPreferences: OrderVisionPreferences {
-        guard AppIdentity.isVisionTest,
-              let data = UserDefaults.standard.data(forKey: prefix + "orderVisionPreferences"),
+        guard let data = UserDefaults.standard.data(forKey: prefix + "orderVisionPreferences"),
               let preferences = try? JSONDecoder().decode(OrderVisionPreferences.self, from: data),
               let validated = try? preferences.validated() else { return .defaults }
         return validated
     }
     static var effectiveOrderVisionRules: String {
-        guard AppIdentity.isVisionTest else { return OrderVisionClassifier.defaultRules }
         return orderVisionPreferences.composedRules(base: OrderVisionClassifier.defaultRules)
     }
     static func saveOrderVisionSettings(preferences: OrderVisionPreferences) throws {
         let preferences = try preferences.validated()
-        guard AppIdentity.isVisionTest,
-              preferences.composedRules(base: OrderVisionClassifier.defaultRules).count <= 16_000 else {
+        guard preferences.composedRules(base: OrderVisionClassifier.defaultRules).count <= 16_000 else {
             throw OrderVisionPreferenceError.invalid("识别要求过长，请缩短补充要求。")
         }
         let data = try JSONEncoder().encode(preferences)
@@ -129,7 +125,6 @@ public struct AIRequestConfiguration: Sendable {
         UserDefaults.standard.set(data, forKey: prefix + "orderVisionPreferences")
     }
     static func resetOrderVisionSettings() {
-        guard AppIdentity.isVisionTest else { return }
         if orderVisionPreferences != .defaults { revision += 1 }
         UserDefaults.standard.removeObject(forKey: prefix + "orderVisionPreferences")
     }

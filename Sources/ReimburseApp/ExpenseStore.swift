@@ -404,17 +404,15 @@ public struct ExpenseExportIssue: Identifiable {
     func markEdited(_ id: UUID, field: Field) {
         if let index = expenses.firstIndex(where: { $0.id == id }) {
             expenses[index].aiRecognized = nil
-            if AppIdentity.isVisionTest {
-                let fragments: [String]
-                switch field {
-                case .purpose, .category: fragments = ["用途待确认", "用途分类待确认"]
-                case .amount: fragments = ["金额待核对（视觉 AI 返回无效"]
-                case .date: fragments = ["日期待核对（视觉 AI 返回无效"]
-                }
-                let remaining = (expenses[index].warning ?? "").components(separatedBy: "；")
-                    .filter { !$0.isEmpty && !fragments.contains(where: $0.contains) }
-                expenses[index].warning = remaining.isEmpty ? nil : remaining.joined(separator: "；")
+            let fragments: [String]
+            switch field {
+            case .purpose, .category: fragments = ["用途待确认", "用途分类待确认"]
+            case .amount: fragments = ["金额待核对（视觉 AI 返回无效"]
+            case .date: fragments = ["日期待核对（视觉 AI 返回无效"]
             }
+            let remaining = (expenses[index].warning ?? "").components(separatedBy: "；")
+                .filter { !$0.isEmpty && !fragments.contains(where: $0.contains) }
+            expenses[index].warning = remaining.isEmpty ? nil : remaining.joined(separator: "；")
         }
         if field == .category || field == .purpose { categoryRevisions[id, default: 0] += 1 }
         if field == .amount {
@@ -450,8 +448,8 @@ public struct ExpenseExportIssue: Identifiable {
     }
 
     private func automaticallyAssist(_ id: UUID) {
-        if AppIdentity.isVisionTest {
-            if AIConfiguration.enabled, AIConfiguration.orderVisionEnabled, !visionAttemptedIDs.contains(id) { classifyWithVisionAI(id) }
+        if AIConfiguration.orderVisionEnabled {
+            if AIConfiguration.enabled, !visionAttemptedIDs.contains(id) { classifyWithVisionAI(id) }
             return
         }
         guard AIConfiguration.enabled, let plan = automaticAIPlan(for: id) else { return }
@@ -459,7 +457,7 @@ public struct ExpenseExportIssue: Identifiable {
     }
 
     func visionAIPlan(for id: UUID) -> AutomaticAIPlan? {
-        guard AppIdentity.isVisionTest, AIConfiguration.orderVisionEnabled,
+        guard AIConfiguration.orderVisionEnabled,
               !pendingIDs.contains(id), !aiPendingIDs.contains(id),
               let expense = expenses.first(where: { $0.id == id }), !expense.isDuplicate else { return nil }
         return AutomaticAIPlan(category: categoryRevisions[id, default: 0] == 0,
@@ -694,7 +692,7 @@ public struct ExpenseExportIssue: Identifiable {
         if categoryRevisions[id, default: 0] > 0,
            !expenses[index].purpose.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             resolved.append("用途分类待确认")
-            if AppIdentity.isVisionTest { resolved.append("用途待确认") }
+            resolved.append("用途待确认")
         }
         if amountRevisions[id, default: 0] > 0, expenses[index].amount.map({ $0 > 0 }) == true {
             resolved += Self.amountWarningFragments
@@ -734,7 +732,7 @@ public struct ExpenseExportIssue: Identifiable {
         if let date, ExpenseDate.isValid(date) {
             expenses[index].date = date
             dateCandidates[id] = []
-            acceptAIResult(at: index, removing: AppIdentity.isVisionTest ? ["日期待核对（视觉 AI 返回无效"] : [])
+            acceptAIResult(at: index, removing: ["日期待核对（视觉 AI 返回无效"])
             appendAINote("AI 已填写日期 \(date)\(result.isCertain ? "" : "（参考日期）")：\(result.reason)", to: id)
         } else {
             dateCandidates[id] = result.candidates.filter(ExpenseDate.isValid)
@@ -781,9 +779,10 @@ public struct ExpenseExportIssue: Identifiable {
         guard amountCandidates[id]?.contains(candidate) == true,
               let index = expenses.firstIndex(where: { $0.id == id }),
               !expenses[index].isDuplicate else { return }
+        let hasVisualWarnings = expenses[index].warning?.contains("视觉 AI") == true
         markEdited(id, field: .amount)
         expenses[index].amount = candidate.amount
-        if AppIdentity.isVisionTest {
+        if hasVisualWarnings {
             let remaining = (expenses[index].warning ?? "").components(separatedBy: "；")
                 .filter { !$0.isEmpty && !Self.amountWarningFragments.contains(where: $0.contains) }
             expenses[index].warning = remaining.isEmpty ? nil : remaining.joined(separator: "；")
@@ -846,7 +845,7 @@ public struct ExpenseExportIssue: Identifiable {
     }
 
     private func startVisionInsteadOfLocalRecognition(_ id: UUID, recognize: (@MainActor (UUID) -> Void)?) -> Bool {
-        guard AppIdentity.isVisionTest, AIConfiguration.enabled, AIConfiguration.orderVisionEnabled else { return false }
+        guard AIConfiguration.enabled, AIConfiguration.orderVisionEnabled else { return false }
         recognitionTokens.removeValue(forKey: id)
         pendingIDs.remove(id)
         editedFields.removeValue(forKey: id)
@@ -882,7 +881,7 @@ public struct ExpenseExportIssue: Identifiable {
         recognitionTokens.removeValue(forKey: id)
         pendingIDs.remove(id)
         editedFields.removeValue(forKey: id)
-        if AppIdentity.isVisionTest { visionAttemptedIDs.insert(id) }
+        visionAttemptedIDs.insert(id)
         automaticallyAssist(id)
     }
 }

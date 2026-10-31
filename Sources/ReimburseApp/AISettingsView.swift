@@ -11,21 +11,27 @@ struct AISettingsView: View {
                 Text("AI 辅助识别设置").font(.title2)
                 Toggle("启用 AI 辅助识别", isOn: $state.enabled)
                     .disabled(state.testing)
-                if AppIdentity.isVisionTest {
-                    Toggle("使用 AI 视觉识别订单截图（上传图片）", isOn: $state.orderVisionEnabled)
-                        .disabled(state.testing)
-                    Text("视觉测试版：开启后，每张新导入的非重复订单仅上传截图，由 AI 视觉识别金额、日期和用途，不运行本地 OCR 或规则，也不以本地结果补填。关闭 AI 或此选项时使用本地识别。图片可能包含姓名、地址、账号等隐私信息，服务可能收费；请使用支持图片输入的模型。")
+                Toggle("订单 AI 视觉识别（测试功能）", isOn: $state.orderVisionEnabled)
+                    .disabled(!state.enabled || state.testing)
+                if state.orderVisionEnabled {
+                    Text("测试功能：启用 AI 并保存后，每张新导入的非重复订单直接上传截图，由 AI 视觉识别金额、日期和用途，不运行本地 OCR 或规则，也不以本地结果补填。识别失败不自动重试。图片可能包含姓名、地址、账号等隐私信息，服务可能收费；请使用支持图片输入的模型。")
                         .font(.callout).foregroundStyle(.orange)
-                    Text("项目、密钥和设置与正式版独立，需重新填写配置。同一记录只自动尝试一次；保存项目后重开不会自动重复上传。更换模型后可点“重测选中订单”，会再次产生请求。手动修改或重开后已保存的字段会保留，重测结果在行内显示供对比。测试连接仅验证文字。")
+                    Text("同一记录只自动尝试一次，已有记录不会整批重跑。可点“重测选中订单”主动再次识别，会再次产生请求。手动修改或重开后已保存的字段会保留，重测结果在行内显示供对比。测试连接仅验证文字。")
                         .font(.caption).foregroundStyle(.secondary)
-                    Text("用途会根据商品、转账备注、账单说明或商户名称概括；只有店名时也可填写“某便利店消费”，分类仍可留待分类。")
+                    Text("用途会根据商品、转账备注、账单说明或商户名称概括；只有平台消费摘要时也可填写“某平台消费”，分类仍可留待分类。")
                         .font(.caption).foregroundStyle(.secondary)
-                    Button("AI 识别偏好…") { state.showingRules = true }
-                        .disabled(state.testing)
+                } else {
+                    Text("默认使用原有识别方式：先在本地识别截图；启用 AI 辅助识别后，仅在用途、金额或日期未确定时上传识别文字协助判断。明确结果直接填写并可导出，仍不确定时再人工处理。")
+                        .font(.callout).foregroundStyle(.secondary)
                 }
-
-                if !AppIdentity.isVisionTest { Text("保存并启用后，订单中本地未识别的用途、金额或日期会自动交给 AI，当前待处理记录也会接续处理。仅发送识别文字；月日可按当前年份补全。明确结果直接填写并可导出；日期可自动采用有原文依据的参考日期，金额和用途仍不确定时才需要处理。")
-                    .font(.callout).foregroundStyle(.secondary) }
+                Button("视觉识别偏好…") { state.showingRules = true }
+                    .disabled(state.testing)
+                Text("这里的用途、日期选项和补充要求仅用于上述视觉识别测试功能。")
+                    .font(.caption).foregroundStyle(.secondary)
+                if AppIdentity.isVisionTest {
+                    Text("独立视觉测试版的项目、密钥和设置与正式版分别保存。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 Divider()
                 Toggle("允许发票 AI 兜底上传文字和页面预览", isOn: $state.invoiceFallbackEnabled)
                     .disabled(!state.enabled || state.testing)
@@ -65,7 +71,7 @@ struct AISettingsView: View {
                 HStack {
                     Button(state.testing ? "正在测试…" : "测试连接") { Task { await state.test() } }
                         .disabled(state.testing)
-                    Text("测试仅验证文字连接；发票需支持图像输入的模型。测试可能产生少量 API 费用。")
+                    Text("测试仅验证文字连接；订单视觉识别和发票预览需支持图像输入的模型。测试可能产生少量 API 费用。")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 HStack {
@@ -122,7 +128,7 @@ struct AISettingsView: View {
             try AIConfiguration.save(profile: AIProfile(endpoint: endpoint, model: model), apiKey: key, provider: provider)
             AIConfiguration.provider = provider
             AIConfiguration.enabled = enabled
-            if AppIdentity.isVisionTest { AIConfiguration.orderVisionEnabled = orderVisionEnabled }
+            AIConfiguration.orderVisionEnabled = orderVisionEnabled
             AIConfiguration.invoiceFallbackEnabled = invoiceFallbackEnabled
             key = ""
             message = "已保存，当前使用\(provider.title)。"

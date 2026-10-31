@@ -3,7 +3,6 @@ import Foundation
 
 @main struct OrderRecognitionModeCheck {
     @MainActor static func main() async throws {
-        precondition(AppIdentity.isVisionTest)
         let defaults = UserDefaults.standard
         let previous = defaults.volatileDomain(forName: UserDefaults.argumentDomain)
         defer { defaults.setVolatileDomain(previous, forName: UserDefaults.argumentDomain) }
@@ -121,7 +120,22 @@ import Foundation
                 recognizeVisually: { _ in preconditionFailure("Disabled AI or upload consent must use local recognition") })
             precondition(store.expenses[0].amount == 39 && store.expenses[0].date == "2026-10-01" && store.expenses[0].purpose == "本地餐食用途")
             precondition(store.recognizedTexts[localID] == "仅本地OCR文字" && !store.pendingIDs.contains(localID))
+            precondition(store.automaticAIPlan(for: localID) == nil, "Complete local records don't need text AI")
+            mode(enabled: true, upload: true)
+            store.automaticallyAssistUnresolvedExpenses()
+            precondition(store.aiPendingIDs.isEmpty, "Enabling visual mode must not upload completed local records")
         }
+
+        store.reset(); mode(enabled: true, upload: false)
+        let unresolvedID = store.queue(fixture)
+        // Isolate eligibility without invoking the real text service or reading credentials.
+        await store.recognizeExpense(id: unresolvedID, url: fixture,
+            recognizeLocally: { _ in recognizedLocal },
+            recognizeVisually: { _ in preconditionFailure("Default recognition cannot dispatch vision") })
+        store.applySuggestion(Suggestion(amount: nil, category: .uncategorized, purpose: "", warning: "用途分类待确认", recognizedText: "付款完成，但金额和用途尚未确定"), to: unresolvedID)
+        let textFallback = store.automaticAIPlan(for: unresolvedID)
+        precondition(textFallback?.category == true && textFallback?.amount == true && textFallback?.date == true, "Visual off retains original local OCR plus text-AI fallback eligibility")
+        precondition(store.visionAIPlan(for: unresolvedID) == nil && store.aiPendingIDs.isEmpty)
 
         store.reset(); mode(enabled: false, upload: false)
         let switchedID = store.queue(fixture)

@@ -2,7 +2,13 @@
 import Foundation
 
 @main struct OrderVisionPreferencesCheck {
-    static func main() throws {
+    @MainActor static func main() throws {
+        let previous = UserDefaults.standard.volatileDomain(forName: UserDefaults.argumentDomain)
+        defer { UserDefaults.standard.setVolatileDomain(previous, forName: UserDefaults.argumentDomain) }
+        for selected in [false, true] {
+            UserDefaults.standard.setVolatileDomain(previous.merging(["reimbursement.ai.orderVisionEnabled": selected]) { _, value in value }, forName: UserDefaults.argumentDomain)
+            precondition(AIConfiguration.orderVisionEnabled == selected, "The experimental switch follows explicit selection in either build")
+        }
         precondition(AIProvider(rawValue: "aliyun") == .aliyun, "Old provider identity remains compatible")
         precondition(AIProvider.qianwen.rawValue != AIProvider.aliyun.rawValue, "New platform has a separate credential account")
         let profile = AIProvider.qianwen.defaultProfile

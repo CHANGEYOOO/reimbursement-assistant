@@ -5,8 +5,8 @@ project_dir=${0:A:h:h}
 vision_test="${REIMBURSE_VISION_TEST:-0}"
 app_name="报销单助手"
 bundle_identifier="top.kjoe.ReimburseMacApp"
-app_version="1.34"
-app_build="38"
+app_version="1.35"
+app_build="39"
 swift_flags=()
 if [[ "$vision_test" == 1 ]]; then
     app_name="报销单助手·视觉测试"
