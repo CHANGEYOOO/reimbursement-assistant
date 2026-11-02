@@ -14,10 +14,10 @@
 
 | 你的电脑 | 下载 | 怎么安装 |
 | --- | --- | --- |
-| Apple 芯片 Mac，macOS 15 或更新版本 | [下载 Mac 1.34（DMG）](https://github.com/CHANGEYOOO/reimbursement-assistant/releases/download/v1.34.0/ReimbursementAssistant-macOS-1.34.dmg) | 打开 DMG，将软件拖入“应用程序” |
+| Apple 芯片 Mac，macOS 15 或更新版本 | [下载 Mac 1.35（DMG）](https://github.com/CHANGEYOOO/reimbursement-assistant/releases/download/v1.35.0/ReimbursementAssistant-macOS-1.35.dmg) | 打开 DMG，将软件拖入“应用程序” |
 | 64 位 Windows，推荐 Windows 11 | [下载 Windows 1.34（EXE）](https://github.com/CHANGEYOOO/reimbursement-assistant/releases/download/v1.34.0/ReimbursementAssistant-Windows-1.34-Setup.exe) | 运行 EXE，按中文提示安装 |
 
-[查看更新说明与全部下载文件](https://github.com/CHANGEYOOO/reimbursement-assistant/releases/tag/v1.34.0)
+[查看更新说明与全部下载文件](https://github.com/CHANGEYOOO/reimbursement-assistant/releases/tag/v1.35.0)
 
 Mac 首次打开若提示“Apple 无法验证”，确认来自本仓库后，可到“系统设置 → 隐私与安全性”选择“仍要打开”。Windows 安装包未商业签名，首次运行可能出现信誉提示。
 
@@ -129,6 +129,10 @@ Mac 点击左下角齿轮；Windows 点击左侧 **“设置”**，再进入 **
 | 邮箱附件本地无法判断是否为发票 | 还需单独允许“发票 AI 兜底上传文字和页面预览”；授权默认关闭，需使用支持图片的模型 |
 
 发票 AI 明确判断后会采用其结果；AI 不确定、返回矛盾或调用失败时仍保留待确认。识别结果会缓存，避免同一文件重复请求；清除 AI 缓存后再次识别可能收费。
+
+**Mac 1.35 新增：订单 AI 视觉识别（测试功能）。** 默认关闭，原来的识别方式保持不变。在 AI 设置中打开并保存，使用支持图片的模型即可体验。开启后，新导入的订单直接上传截图，由 AI 判断金额、日期和用途，不进行本地文字识别。金额优先整笔订单最终实付总额，用途可概括为商户消费或转账付款。失败不会自动重试，需要时点击“重测选中订单”。视觉偏好提供用途、日期选项和一个“补充要求”输入框，支持恢复默认。Windows 本次仍为 1.34，尚未加入此功能。
+
+视觉识别上传的截图可能包含姓名、地址、账号等信息，并可能产生费用。切换开关不会重新识别已有订单，手动修改的内容会保留。
 
 **隐私提示：**普通文字识别在本地完成。订单 AI 发送识别文字；单独授权的发票 AI 会发送文字和页面图片，可能包含姓名、税号等信息。Mac 密钥保存在钥匙串，Windows 使用当前用户的系统加密保存。AI 服务可能收费，请按需开启。
 
